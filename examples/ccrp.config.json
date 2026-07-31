@@ -1,0 +1,22 @@
+{
+  "ssh": {
+    "host": "my-server",
+    "options": [
+      "ConnectTimeout=10"
+    ]
+  },
+  "server_proxy": {
+    "listen": "127.0.0.1:8080"
+  },
+  "routes": [
+    {
+      "name": "cc-switch",
+      "local": "127.0.0.1:3456",
+      "remote_forward": "127.0.0.1:18080",
+      "path_prefix": "/",
+      "strip_path_prefix": false,
+      "target_path_prefix": "",
+      "preserve_host": false
+    }
+  ]
+}

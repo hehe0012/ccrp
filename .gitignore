@@ -1,0 +1,23 @@
+__pycache__/
+*.pyc
+.env
+.venv/
+
+# Local ccrp configs; keep examples/ccrp.config.json tracked.
+/ccrp.config.json
+/ccrp.*.json
+/tmp.*.config.json
+
+# Build/test artifacts.
+/build/
+/dist/
+/*.egg-info/
+.pytest_cache/
+
+# Local workspace notes or unrelated helper scripts from this folder.
+/codex.txt
+/idea.txt
+/download_dreamzero_weights_fast.sh
+/remote_tmux_memory_and_checkpoint_defaults.py
+/update_h102_docs_chinese.py
+/verify_checkpoint_files.py
