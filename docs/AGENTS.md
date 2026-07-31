@@ -43,7 +43,7 @@ This creates:
 - `~/.local/bin/claude-ccrp`
 - `~/.local/bin/codex-ccrp`
 - `~/.claude/settings.json` for Claude Code
-- `~/.codex/config.toml` and `~/.codex/.env` for Codex
+- `~/.codex/config.toml`, `~/.codex/.env`, and `~/.codex/auth.json` for Codex
 
 Then start clients with:
 
@@ -95,7 +95,7 @@ Run:
   --codex-wire-api chat
 ```
 
-The script creates a `ccrp` model provider in `~/.codex/config.toml` and makes it the default provider unless `--no-set-default` is passed.
+The script creates a `ccrp` model provider in `~/.codex/config.toml`, writes `OPENAI_API_KEY` into `~/.codex/auth.json`, and makes the provider the default unless `--no-set-default` is passed. Existing `auth.json` is backed up before modification.
 
 ## Dry run
 
@@ -109,5 +109,5 @@ Preview changes without writing files:
 
 - The recommended reverse proxy URL is server-local: `http://127.0.0.1:18080`.
 - Do not bind the proxy to `0.0.0.0` unless you intentionally want public access and have auth/TLS configured.
-- The script backs up existing `~/.codex/config.toml` before modifying it.
+- The script backs up existing `~/.codex/config.toml` and `~/.codex/auth.json` before modifying them.
 - Real API/proxy tokens should not be committed to Git.

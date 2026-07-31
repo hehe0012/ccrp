@@ -56,7 +56,7 @@ After the tunnel is running, you can configure server-side clients to use the re
 ~/.local/bin/install-agent-proxy-config.sh --target both --base-url http://127.0.0.1:18080
 ```
 
-It generates Claude Code and Codex config/wrapper files that point to the private reverse proxy port. See [docs/AGENTS.md](docs/AGENTS.md).
+It generates Claude Code and Codex config/wrapper files, including Codex `~/.codex/auth.json`, that point to the private reverse proxy port. See [docs/AGENTS.md](docs/AGENTS.md).
 
 ## Deploy to another server
 

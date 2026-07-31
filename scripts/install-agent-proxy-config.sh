@@ -21,6 +21,7 @@ Options:
   --codex-model MODEL             Codex model name override
   --codex-provider NAME           Codex model provider id (default: ccrp)
   --codex-wire-api chat|responses Codex wire API (default: chat; most OpenAI-compatible proxies use chat)
+  --codex-auth-json PATH          Codex auth.json path (default: ~/.codex/auth.json)
   --no-set-default                Add Codex provider but do not make it the default provider
   --dry-run                       Print actions without writing files
   -h, --help                      Show this help
@@ -51,6 +52,7 @@ CLAUDE_MODEL=""
 CODEX_MODEL=""
 CODEX_PROVIDER="ccrp"
 CODEX_WIRE_API="chat"
+CODEX_AUTH_JSON=""
 SET_DEFAULT=1
 DRY_RUN=0
 
@@ -67,6 +69,7 @@ while [[ $# -gt 0 ]]; do
     --codex-model) CODEX_MODEL="${2:?missing value for --codex-model}"; shift 2 ;;
     --codex-provider) CODEX_PROVIDER="${2:?missing value for --codex-provider}"; shift 2 ;;
     --codex-wire-api) CODEX_WIRE_API="${2:?missing value for --codex-wire-api}"; shift 2 ;;
+    --codex-auth-json) CODEX_AUTH_JSON="${2:?missing value for --codex-auth-json}"; shift 2 ;;
     --no-set-default) SET_DEFAULT=0; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
     -h|--help) usage; exit 0 ;;
@@ -109,6 +112,7 @@ ENV_FILE="$CCRP_CONFIG_DIR/agent-proxy.env"
 CLAUDE_SETTINGS="${CLAUDE_SETTINGS:-$HOME/.claude/settings.json}"
 CODEX_CONFIG="${CODEX_HOME:-$HOME/.codex}/config.toml"
 CODEX_ENV="${CODEX_HOME:-$HOME/.codex}/.env"
+CODEX_AUTH_JSON="${CODEX_AUTH_JSON:-${CODEX_HOME:-$HOME/.codex}/auth.json}"
 LOCAL_BIN="$HOME/.local/bin"
 
 run_or_echo() {
@@ -267,6 +271,38 @@ PY
     fi
   } > "$CODEX_ENV"
   chmod 600 "$CODEX_ENV"
+
+  local codex_api_key="${TOKEN:-ccrp}"
+  run_or_echo mkdir -p "$(dirname "$CODEX_AUTH_JSON")"
+  if [[ "$DRY_RUN" == "1" ]]; then
+    echo "[dry-run] merge OPENAI_API_KEY into $CODEX_AUTH_JSON"
+  else
+    python3 - "$CODEX_AUTH_JSON" "$codex_api_key" <<'PY'
+import json
+import pathlib
+import sys
+import time
+
+path = pathlib.Path(sys.argv[1])
+api_key = sys.argv[2]
+if path.exists():
+    text = path.read_text(encoding="utf-8-sig")
+    backup = path.with_name(path.name + ".bak." + time.strftime("%Y%m%d%H%M%S"))
+    backup.write_text(text, encoding="utf-8")
+    try:
+        data = json.loads(text)
+        if not isinstance(data, dict):
+            data = {}
+    except json.JSONDecodeError:
+        data = {}
+else:
+    data = {}
+
+data["OPENAI_API_KEY"] = api_key
+path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+PY
+    chmod 600 "$CODEX_AUTH_JSON"
+  fi
 }
 
 write_wrappers() {
@@ -317,6 +353,7 @@ fi
 if [[ "$TARGET" == "codex" || "$TARGET" == "both" ]]; then
   echo "  $CODEX_CONFIG"
   echo "  $CODEX_ENV"
+  echo "  $CODEX_AUTH_JSON"
 fi
 
 cat <<'EOF'
