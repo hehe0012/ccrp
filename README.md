@@ -47,6 +47,17 @@ Then on the server:
 curl http://127.0.0.1:8080/__ccrp/health
 ```
 
+## Configure Claude Code or Codex on the server
+
+After the tunnel is running, you can configure server-side clients to use the reverse proxy endpoint:
+
+```bash
+# Run on the server after uploading scripts/install-agent-proxy-config.sh
+~/.local/bin/install-agent-proxy-config.sh --target both --base-url http://127.0.0.1:18080
+```
+
+It generates Claude Code and Codex config/wrapper files that point to the private reverse proxy port. See [docs/AGENTS.md](docs/AGENTS.md).
+
 ## Deploy to another server
 
 1. Make sure the new server can be reached by SSH:

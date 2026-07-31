@@ -21,3 +21,5 @@ __pycache__/
 /remote_tmux_memory_and_checkpoint_defaults.py
 /update_h102_docs_chinese.py
 /verify_checkpoint_files.py
+/ccrp.*.log
+/ccrp.*.pid
