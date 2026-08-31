@@ -14,6 +14,26 @@ No public port is opened. The server reaches the local service through:
 curl http://127.0.0.1:18080
 ```
 
+## Server-side one-click launcher
+
+After the repository and a server config have been installed, start the server-side proxy with:
+
+```bash
+cd ~/software/SSHRev
+chmod +x scripts/start-ccrp-server.sh
+scripts/start-ccrp-server.sh --config ~/.config/ccrp/config.json
+```
+
+The script starts `ccrp.py server` in the `ccrp-server` tmux session. Useful commands:
+
+```bash
+scripts/start-ccrp-server.sh --status
+scripts/start-ccrp-server.sh --logs
+scripts/start-ccrp-server.sh --restart
+scripts/start-ccrp-server.sh --stop
+```
+
+Use `--foreground` when tmux is unavailable. The local machine must still run `ccrp.py up` to create the SSH reverse tunnel.
 ## Server-side router with tmux
 
 Use this when you want a stable local endpoint on the server, route health checks, and multiple route prefixes.

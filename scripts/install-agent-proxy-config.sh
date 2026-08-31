@@ -20,7 +20,7 @@ Options:
   --claude-model MODEL            Claude Code model name override
   --codex-model MODEL             Codex model name override
   --codex-provider NAME           Codex model provider id (default: ccrp)
-  --codex-wire-api chat|responses Codex wire API (default: chat; most OpenAI-compatible proxies use chat)
+  --codex-wire-api chat|responses Codex wire API (default: responses; use chat for older OpenAI-compatible proxies)
   --codex-auth-json PATH          Codex auth.json path (default: ~/.codex/auth.json)
   --no-set-default                Add Codex provider but do not make it the default provider
   --dry-run                       Print actions without writing files
@@ -51,7 +51,7 @@ MODEL=""
 CLAUDE_MODEL=""
 CODEX_MODEL=""
 CODEX_PROVIDER="ccrp"
-CODEX_WIRE_API="chat"
+CODEX_WIRE_API="responses"
 CODEX_AUTH_JSON=""
 SET_DEFAULT=1
 DRY_RUN=0

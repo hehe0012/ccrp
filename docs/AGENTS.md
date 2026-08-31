@@ -91,11 +91,10 @@ Run:
 ~/.local/bin/install-agent-proxy-config.sh \
   --target codex \
   --base-url http://127.0.0.1:18080 \
-  --codex-model gpt-5-codex \
-  --codex-wire-api chat
+  --codex-model gpt-5-codex
 ```
 
-The script creates a `ccrp` model provider in `~/.codex/config.toml`, writes `OPENAI_API_KEY` into `~/.codex/auth.json`, and makes the provider the default unless `--no-set-default` is passed. Existing `auth.json` is backed up before modification.
+The script creates a `ccrp` model provider in `~/.codex/config.toml`, uses Codex `wire_api = responses` by default, writes `OPENAI_API_KEY` into `~/.codex/auth.json`, and makes the provider the default unless `--no-set-default` is passed. Existing `auth.json` is backed up before modification. If you need an older OpenAI-compatible chat endpoint, pass `--codex-wire-api chat`.
 
 ## Dry run
 
