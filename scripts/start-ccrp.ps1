@@ -9,7 +9,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$projectRoot = (Resolve-Path (Join-Path $PSScriptRoot ".." )).Path
+$projectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 Set-Location -LiteralPath $projectRoot
 
 function Fail([string] $Message) {
@@ -17,28 +17,23 @@ function Fail([string] $Message) {
     exit 1
 }
 
-if (-not (Test-Path -LiteralPath (Join-Path $projectRoot "ccrp.py") -PathType Leaf)) {
+$ccrpScript = Join-Path $projectRoot "ccrp.py"
+if (-not (Test-Path -LiteralPath $ccrpScript -PathType Leaf)) {
     Fail "找不到 ccrp.py：$projectRoot"
 }
 
+if (-not $Config -and $env:CCRP_CONFIG) {
+    $Config = $env:CCRP_CONFIG
+}
+
 if (-not $Config) {
-    $preferredNames = @(
-        "ccrp.config.json",
-        "ccrp.h102-15721.json"
-    )
-
-    foreach ($name in $preferredNames) {
-        $candidate = Join-Path $projectRoot $name
-        if (Test-Path -LiteralPath $candidate -PathType Leaf) {
-            $Config = $candidate
-            break
-        }
-    }
-
-    if (-not $Config) {
+    $defaultConfig = Join-Path $projectRoot "ccrp.config.json"
+    if (Test-Path -LiteralPath $defaultConfig -PathType Leaf) {
+        $Config = $defaultConfig
+    } else {
         $candidates = @(
             Get-ChildItem -LiteralPath $projectRoot -Filter "ccrp*.json" -File |
-                Where-Object { $_.Name -notmatch "\.deploy-test\.json$|\.fresh\.json$" }
+                Sort-Object Name
         )
 
         if ($candidates.Count -eq 1) {
@@ -47,12 +42,12 @@ if (-not $Config) {
             Fail "没有找到 ccrp 配置文件。请先运行：python .\ccrp.py init --out ccrp.config.json ..."
         } else {
             $names = ($candidates | ForEach-Object { $_.Name }) -join ", "
-            Fail "找到多个配置文件（$names）。请使用 -Config 明确指定配置文件。"
+            Fail "找到多个配置文件（$names），为避免使用错误端口，必须使用 -Config 明确指定。"
         }
     }
 }
 
-$configPath = (Resolve-Path -LiteralPath $Config -ErrorAction SilentlyContinue)
+$configPath = Resolve-Path -LiteralPath $Config -ErrorAction SilentlyContinue
 if (-not $configPath) {
     Fail "配置文件不存在：$Config"
 }
@@ -62,24 +57,31 @@ $pythonCommand = Get-Command $Python -ErrorAction SilentlyContinue
 if (-not $pythonCommand) {
     Fail "找不到 Python 命令 '$Python'。请安装 Python 3，或使用 -Python 指定 python.exe 的完整路径。"
 }
+$pythonPath = $pythonCommand.Source
 
 Write-Host "项目目录：$projectRoot" -ForegroundColor Cyan
 Write-Host "配置文件：$configPath" -ForegroundColor Cyan
-Write-Host "Python：$($pythonCommand.Source)" -ForegroundColor Cyan
+Write-Host "Python：$pythonPath" -ForegroundColor Cyan
 
 if (-not $NoDoctor) {
     Write-Host "正在检查配置..." -ForegroundColor Yellow
-    & $pythonCommand.Source (Join-Path $projectRoot "ccrp.py") doctor -c $configPath
+    & $pythonPath $ccrpScript doctor -c $configPath
     if ($LASTEXITCODE -ne 0) {
         Fail "ccrp doctor 检查失败，已停止启动。"
     }
+}
+
+Write-Host "实际 SSH 反向转发命令：" -ForegroundColor Yellow
+& $pythonPath $ccrpScript print-ssh -c $configPath
+if ($LASTEXITCODE -ne 0) {
+    Fail "无法生成 SSH 反向转发命令，已停止启动。"
 }
 
 Write-Host "正在启动 SSH 反向隧道。关闭此窗口会停止隧道。" -ForegroundColor Green
 Write-Host "按 Ctrl+C 可停止。" -ForegroundColor DarkGray
 Write-Host ""
 
-& $pythonCommand.Source (Join-Path $projectRoot "ccrp.py") up -c $configPath
+& $pythonPath $ccrpScript up -c $configPath
 $exitCode = $LASTEXITCODE
 
 if ($exitCode -ne 0) {
