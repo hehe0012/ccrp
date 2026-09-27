@@ -12,7 +12,7 @@
 本地 cc-switch：       127.0.0.1:15721
 服务器 SSH 反向端口：  127.0.0.1:18082
 服务器 ccrp 代理端口：127.0.0.1:18083
-服务器配置：           ~/software/SSHRev/ccrp.deploy-test.json
+服务器配置：           ~/your_path/ccrp.deploy-test.json
 本地配置：             D:\workspace\projects\SSHRev\ccrp.h102-15721-fresh.json
 SSH 主机别名：         h102
 ```
@@ -28,7 +28,52 @@ SSH 主机别名：         h102
 
 `18082` 和 `18083` 必须与两端配置一致。不要使用旧配置中把反向端口设置为 `18080` 的文件。
 
-## 一、服务器端更新代码
+## 一、本地生成配置
+
+如果本地还没有对应配置文件，可以在 Windows PowerShell 中生成：
+
+```powershell
+cd D:\workspace\projects\SSHRev
+
+python .\ccrp.py init `
+  --out .\ccrp.h102-15721-fresh.json `
+  --ssh h102 `
+  --local 127.0.0.1:15721 `
+  --remote-port 18082 `
+  --listen 127.0.0.1:18083 `
+  --force
+```
+
+参数含义：
+
+- `--out`：生成的本地配置文件。
+- `--ssh`：SSH 主机别名，例如 `h102`。
+- `--local`：本地 `cc-switch` 服务地址。
+- `--remote-port`：服务器上由 SSH `-R` 创建的反向端口，这里是 `18082`。
+- `--listen`：服务器端 `ccrp server` 的代理监听地址，这里是 `127.0.0.1:18083`。
+
+生成后先检查配置：
+
+```powershell
+python .\ccrp.py doctor `
+  -c .\ccrp.h102-15721-fresh.json
+```
+
+再确认实际 SSH 反向转发命令：
+
+```powershell
+python .\ccrp.py print-ssh `
+  -c .\ccrp.h102-15721-fresh.json
+```
+
+输出中必须包含：
+
+```text
+-R 127.0.0.1:18082:127.0.0.1:15721
+```
+
+如果看到的是 `18080`，说明使用了旧配置或生成参数不对，需要重新生成配置。
+## 二、服务器端更新代码
 
 在本地 PowerShell 登录服务器：
 
@@ -39,7 +84,7 @@ ssh h102
 在服务器执行：
 
 ```bash
-cd ~/software/SSHRev
+cd ~/your_path
 git remote set-url origin git@github.com:hehe0012/ccrp.git
 git pull origin main
 ```
@@ -72,15 +117,15 @@ python3 ccrp.py init \
   --force
 ```
 
-## 二、启动服务器端 ccrp
+## 三、启动服务器端 ccrp
 
 服务器端直接使用 `tmux` 启动 `ccrp.py server`：
 
 ```bash
-cd ~/software/SSHRev
+cd ~/your_path
 tmux kill-session -t ccrp-server 2>/dev/null || true
 tmux new-session -d -s ccrp-server \
-  "cd \$HOME/software/SSHRev && python3 ccrp.py server --config ./ccrp.deploy-test.json"
+  "cd \$HOME/your_path && python3 ccrp.py server --config ./ccrp.deploy-test.json"
 ```
 
 检查服务器端代理是否启动：
@@ -125,7 +170,7 @@ python3 ccrp.py server --config ./ccrp.deploy-test.json
 OSError: [Errno 98] Address already in use
 ```
 
-## 三、本地 Windows 启动 SSH 反向隧道
+## 四、本地 Windows 启动 SSH 反向隧道
 
 服务器端启动后，在本地 Windows 打开新的 PowerShell 窗口：
 
@@ -181,7 +226,7 @@ python .\ccrp.py print-ssh `
 -R 127.0.0.1:18082:127.0.0.1:15721
 ```
 
-## 四、确认两个服务器端口
+## 五、确认两个服务器端口
 
 回到服务器执行：
 
@@ -211,7 +256,7 @@ ss -lnt | grep -E '18082|18083'
 
 如果看到 `18080` 而不是 `18082`，说明仍有旧的隧道进程或旧配置在运行。停止本地旧的 `ccrp.py up`，再使用正确配置重新启动。
 
-## 五、按层测试代理
+## 六、按层测试代理
 
 ### 1. 测试 SSH 反向隧道
 
@@ -236,7 +281,7 @@ curl -i http://127.0.0.1:18083/v1/models
 
 第一个请求验证服务器代理自身，第二个请求验证完整转发。
 
-## 六、确认 Codex 配置
+## 七、确认 Codex 配置
 
 服务器执行：
 
@@ -279,7 +324,7 @@ if path.exists():
 PY
 ```
 
-## 七、测试 Codex
+## 八、测试 Codex
 
 ```bash
 command -v codex
@@ -306,16 +351,16 @@ codex exec "请只回复 CCRP_CODEX_OK，不要输出其他内容。"
 CCRP_CODEX_OK
 ```
 
-## 八、日常启动流程
+## 九、日常启动流程
 
 ### 服务器端
 
 ```bash
 ssh h102
-cd ~/software/SSHRev
+cd ~/your_path
 tmux kill-session -t ccrp-server 2>/dev/null || true
 tmux new-session -d -s ccrp-server \
-  "cd \$HOME/software/SSHRev && python3 ccrp.py server --config ./ccrp.deploy-test.json"
+  "cd \$HOME/your_path && python3 ccrp.py server --config ./ccrp.deploy-test.json"
 curl -sS http://127.0.0.1:18083/__ccrp/health
 ```
 
@@ -342,7 +387,7 @@ codex exec --skip-git-repo-check \
   "请只回复 CCRP_CODEX_OK，不要输出其他内容。"
 ```
 
-## 九、停止流程
+## 十、停止流程
 
 ### 停止本地 SSH 隧道
 
