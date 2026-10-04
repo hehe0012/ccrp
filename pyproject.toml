@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ccrp"
-version = "0.2.0"
+version = "0.2.1"
 description = "Private-by-default reverse proxy for cc-switch routes over SSH."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -23,6 +23,7 @@ classifiers = [
 
 [project.scripts]
 ccrp = "ccrp:main"
+ccrp-gui = "ccrp_gui:main"
 
 [tool.setuptools]
-py-modules = ["ccrp"]
+py-modules = ["ccrp", "ccrp_gui"]

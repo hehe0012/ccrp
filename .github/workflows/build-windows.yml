@@ -1,0 +1,33 @@
+name: Windows build
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install build dependency
+        run: python -m pip install pyinstaller
+      - name: Build command line executable
+        run: python -m PyInstaller --noconfirm --clean --onefile --console --name ccrp ccrp.py
+      - name: Build GUI executable
+        run: python -m PyInstaller --noconfirm --clean --onefile --windowed --name ccrp-gui ccrp_gui.py
+      - name: Prepare package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path package | Out-Null
+          Copy-Item dist/ccrp.exe package/ccrp.exe
+          Copy-Item dist/ccrp-gui.exe package/ccrp-gui.exe
+          Copy-Item README.md package/README.md
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ccrp-windows
+          path: package/

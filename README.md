@@ -6,13 +6,52 @@
 
 本文档使用纯命令启动，不依赖 Windows `.cmd`、PowerShell 启动器或服务器端启动脚本。
 
+## Windows 图形界面
+
+项目提供一个基于 Python Tkinter 的 Windows 图形界面，不需要第三方 Python 依赖。它可以：
+
+1. 读取指定的 OpenSSH 配置文件，列出其中的 `Host` 目标并选择服务器。
+2. 通过 SSH 读取服务器家目录下的文件夹，选择 CCRP 部署目录。
+3. 在界面中设置本地 cc-switch 端口、SSH 反向端口、服务器代理端口和超时参数。
+4. 在服务器指定目录克隆或更新 GitHub 仓库，将配置写入仓库目录，并在 tmux 会话中启动 CCRP 服务。
+5. 启动和停止本地 SSH 反向隧道，周期性检查隧道、服务器健康接口和两个服务器端口。
+
+启动方式：
+
+```powershell
+cd D:\workspace\projects\SSHRev
+python .\ccrp_gui.py
+```
+
+如果通过 pip 安装了本项目，也可以运行：
+
+```powershell
+ccrp-gui
+```
+
+也可以使用 Windows 打包版本。下载 `ccrp-gui.exe` 和 `ccrp.exe` 后放在同一个文件夹，双击 `ccrp-gui.exe` 即可。`ccrp.exe` 是 GUI 使用的命令行组件，不要单独删除或改名。GitHub Actions 会在手动运行或推送 `v*` 标签时构建 Windows 工件。
+
+GUI 不保存 SSH 密码和私钥。SSH 登录仍由 OpenSSH 配置、Windows ssh-agent 或系统凭据完成。选择的 SSH 配置文件会通过 `ssh -F` 传给底层命令。服务器需要有 `git`、`python3` 和 `tmux`；`curl` 和 `ss` 主要用于界面监控。
+
+GUI 的典型使用顺序是：选择 SSH 配置文件并读取目标 -> 选择目标服务器 -> 输入或读取远程部署目录 -> 设置仓库地址、分支、端口和超时 -> 点击“部署并启动服务” -> 点击“启动本地隧道”。部署完成后，底部状态栏会每 5 秒刷新一次。
+
+源码构建 Windows 版本需要安装 PyInstaller：
+
+```powershell
+python -m pip install pyinstaller
+python -m PyInstaller --noconfirm --clean --onefile --console --name ccrp ccrp.py
+python -m PyInstaller --noconfirm --clean --onefile --windowed --name ccrp-gui ccrp_gui.py
+```
+
+构建完成后，将 `dist\ccrp.exe` 和 `dist\ccrp-gui.exe` 放在同一个目录。命令行版本用于执行部署和 SSH 隧道，图形界面版本用于交互操作。
+
 ## 当前测试拓扑
 
 ```text
 本地 cc-switch：       127.0.0.1:15721
 服务器 SSH 反向端口：  127.0.0.1:18082
 服务器 ccrp 代理端口：127.0.0.1:18083
-服务器配置：           ~/your_path/ccrp.deploy-test.json
+服务器配置：           ~/software/SSHRev/ccrp.config.json
 本地配置：             D:\workspace\projects\SSHRev\ccrp.h102-15721-fresh.json
 SSH 主机别名：         h102
 ```
@@ -51,6 +90,8 @@ python .\ccrp.py init `
 - `--local`：本地 `cc-switch` 服务地址。
 - `--remote-port`：服务器上由 SSH `-R` 创建的反向端口，这里是 `18082`。
 - `--listen`：服务器端 `ccrp server` 的代理监听地址，这里是 `127.0.0.1:18083`。
+- `--upstream-timeout`：服务器 CCRP 等待 cc-switch 上游连接/读取的空闲超时秒数，默认 `300`。
+- `--ssh-connect-timeout`：SSH 建立连接的超时秒数，默认 `10`；它不控制 API 请求等待时间。
 
 生成后先检查配置：
 
@@ -73,28 +114,44 @@ python .\ccrp.py print-ssh `
 ```
 
 如果看到的是 `18080`，说明使用了旧配置或生成参数不对，需要重新生成配置。
-## 二、服务器端更新代码
+## 二、从本地一键克隆部署服务器
 
-在本地 PowerShell 登录服务器：
+服务端部署由本地 `install-server` 命令通过 SSH 完成。它会先在服务器指定目录克隆仓库；如果目录已经是 Git 仓库，则校正 `origin` 并快进更新指定分支。随后把本地配置写到克隆目录的 `ccrp.config.json`，并在 tmux 会话中启动仓库里的 `ccrp.py`。
+
+首次部署和后续更新都可以使用同一条命令：
 
 ```powershell
-ssh h102
+python .\ccrp.py install-server `
+  --config .\ccrp.h102-15721-fresh.json `
+  --remote-dir ~/software/SSHRev `
+  --repo-url https://github.com/hehe0012/ccrp.git `
+  --branch main `
+  --tmux
 ```
 
-在服务器执行：
+如果仓库是公开仓库，可直接使用上面的 HTTPS 地址。私有仓库应改用服务器已配置 SSH key 的地址，例如 `git@github.com:hehe0012/ccrp.git`，并确认服务器上的 SSH key 有读取权限。不要把 GitHub Token 明文写入命令历史、仓库、README 或聊天内容。
+
+部署行为和限制：
+
+- 服务器必须安装 `git`、`python3` 和 `tmux`，并能访问 GitHub。
+- 首次部署时，目标目录不存在或为空，命令会执行 `git clone`。
+- 后续部署时，命令会把 `origin` 设置为 `--repo-url`，抓取指定分支并通过 `git pull --ff-only` 更新。若本地有无法快进的提交，更新会失败，不会重置或覆盖这些提交。
+- 目标目录非空且不是 Git 仓库时会拒绝部署，不会删除或覆盖目录内容。
+- 每次部署会重新写入克隆目录下的 `ccrp.config.json`，并重启 `ccrp-server` tmux 会话。
+
+GUI 中的“仓库地址”和“分支”默认分别为 `https://github.com/hehe0012/ccrp.git` 与 `main`，可以按部署目标修改。
+
+部署成功后，命令输出会显示仓库 revision、远程配置路径和 tmux 会话。服务器端运行配置默认为 `~/software/SSHRev/ccrp.config.json`；如需使用已有配置文件，请在 GUI 中调整相应配置，或通过 CLI 的 `--remote-config` 指定目标路径。
+
+服务器端部署目录和运行配置确认命令：
 
 ```bash
-cd ~/your_path
-git remote set-url origin git@github.com:hehe0012/ccrp.git
-git pull origin main
-```
-
-确认 Python 和配置文件：
-
-```bash
+cd ~/software/SSHRev
+git remote -v
+git log -1 --oneline
 python3 --version
-test -f ./ccrp.deploy-test.json && echo "配置文件存在" || echo "配置文件不存在"
-grep -nE '"listen"|"local"|"remote_forward"' ./ccrp.deploy-test.json
+test -f ./ccrp.config.json && echo "配置文件存在" || echo "配置文件不存在"
+grep -nE '"listen"|"local"|"remote_forward"|"upstream_timeout"' ./ccrp.config.json
 ```
 
 配置中应为：
@@ -105,7 +162,45 @@ grep -nE '"listen"|"local"|"remote_forward"' ./ccrp.deploy-test.json
 "remote_forward": "127.0.0.1:18082"
 ```
 
-如果配置文件不存在，在服务器执行：
+超时参数位于配置文件中：
+
+```json
+{
+  "ssh": {
+    "host": "h102",
+    "connect_timeout": 10,
+    "server_alive_interval": 30,
+    "server_alive_count_max": 3
+  },
+  "server_proxy": {
+    "listen": "127.0.0.1:18083",
+    "upstream_timeout": 300
+  }
+}
+```
+
+- `server_proxy.upstream_timeout`：CCRP 到 SSH 反向端口的上游连接/读写空闲超时，单位为秒。默认 `300`，适用于较慢的长请求；只有上游连续无数据超过该时间才超时。
+- `ssh.connect_timeout`：本地 SSH 客户端建立服务器连接的超时，单位为秒，默认 `10`。只影响隧道建连，不影响 API 请求时长。
+- `ssh.server_alive_interval` 和 `ssh.server_alive_count_max`：SSH 隧道保活间隔和连续无响应次数，默认分别为 `30` 秒和 `3` 次。
+- `ssh.config_file`：可选的 OpenSSH 配置文件路径，GUI 选择的 SSH 文件会通过 `ssh -F` 使用。
+
+也可以在生成配置时设置超时，例如：
+
+```powershell
+python .\ccrp.py init `
+  --out .\ccrp.h102-15721-fresh.json `
+  --ssh h102 `
+  --local 127.0.0.1:15721 `
+  --remote-port 18082 `
+  --listen 127.0.0.1:18083 `
+  --upstream-timeout 300 `
+  --ssh-connect-timeout 15 `
+  --force
+```
+
+修改 `upstream_timeout` 后，必须在服务器端让正在运行的 `ccrp server` 重新读取配置：停止并重启对应的 tmux 会话（见下方启动步骤）。仅修改本地 JSON 不会改变已经运行的服务器进程。
+
+如需在服务器上手动生成配置（一般 GUI/`install-server` 已经自动上传配置），可执行：
 
 ```bash
 python3 ccrp.py init \
@@ -117,16 +212,25 @@ python3 ccrp.py init \
   --force
 ```
 
-## 三、启动服务器端 ccrp
+## 三、检查服务器端 ccrp
 
 服务器端直接使用 `tmux` 启动 `ccrp.py server`：
 
 ```bash
-cd ~/your_path
+cd ~/software/SSHRev
 tmux kill-session -t ccrp-server 2>/dev/null || true
 tmux new-session -d -s ccrp-server \
-  "cd \$HOME/your_path && python3 ccrp.py server --config ./ccrp.deploy-test.json"
+  "cd \$HOME/software/SSHRev && python3 ccrp.py server --config ./ccrp.config.json"
 ```
+
+也可以临时覆盖配置文件中的上游等待时间，不修改 JSON：
+
+```bash
+tmux new-session -d -s ccrp-server \
+  "cd \$HOME/software/SSHRev && python3 ccrp.py server --config ./ccrp.config.json --upstream-timeout 300"
+```
+
+如果配置文件中已经设置了 `server_proxy.upstream_timeout`，通常不需要这个命令行覆盖参数。
 
 检查服务器端代理是否启动：
 
@@ -161,7 +265,7 @@ tmux attach -t ccrp-server
 不要在 tmux 服务已经运行时再次手动执行：
 
 ```bash
-python3 ccrp.py server --config ./ccrp.deploy-test.json
+python3 ccrp.py server --config ./ccrp.config.json
 ```
 
 否则会因为 `18083` 已经被占用而出现：
@@ -289,16 +393,35 @@ curl -i http://127.0.0.1:18083/v1/models
 grep -nE 'model_provider|base_url|wire_api|env_key' ~/.codex/config.toml
 ```
 
-应该包含：
+示例：
 
 ```toml
 model_provider = "ccrp"
-
+model = "gpt-5.5"
+model_reasoning_effort = "high"
+sandbox_mode = "danger-full-access"
+approval_policy = "never"
 [model_providers.ccrp]
 name = "ccrp"
 base_url = "http://127.0.0.1:18083/v1"
-env_key = "OPENAI_API_KEY"
 wire_api = "responses"
+requires_openai_auth = false
+
+[model_providers.ccrp.http_headers]
+Authorization = "Bearer sk-anything"
+
+[tui]
+screen_reader_detection_done = true
+
+[marketplaces.openai-bundled]
+source_type = "local"
+source = "/home/guian/software/ccrp/home/.tmp/bundled-marketplaces/openai-bundled"
+
+[plugins."visualize@openai-bundled"]
+enabled = true
+
+[permissions.workspace-custom.network]
+enabled = true
 ```
 
 重点确认：
@@ -357,10 +480,10 @@ CCRP_CODEX_OK
 
 ```bash
 ssh h102
-cd ~/your_path
+cd ~/software/SSHRev
 tmux kill-session -t ccrp-server 2>/dev/null || true
 tmux new-session -d -s ccrp-server \
-  "cd \$HOME/your_path && python3 ccrp.py server --config ./ccrp.deploy-test.json"
+  "cd \$HOME/software/SSHRev && python3 ccrp.py server --config ./ccrp.config.json"
 curl -sS http://127.0.0.1:18083/__ccrp/health
 ```
 
@@ -416,6 +539,7 @@ ss -lnt | grep -E '18082|18083' || echo "18082 和 18083 都已停止"
 - `ssh.host`：SSH 主机别名，例如 `h102` 或 `user@example.com`。
 - `ssh.options`：额外 SSH `-o` 参数。
 - `server_proxy.listen`：服务器端代理监听地址。私有访问使用 `127.0.0.1:18083`。
+- `server_proxy.upstream_timeout`：服务器端等待上游响应的空闲超时，默认 `300` 秒。
 - `routes[].local`：本地服务地址，例如 `127.0.0.1:15721`。
 - `routes[].remote_forward`：SSH `-R` 在服务器本机创建的转发地址，例如 `127.0.0.1:18082`。
 - `routes[].path_prefix`：代理匹配的路径前缀。

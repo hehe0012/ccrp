@@ -11,6 +11,7 @@ __pycache__/
 # Build/test artifacts.
 /build/
 /dist/
+/release/
 /*.egg-info/
 .pytest_cache/
 

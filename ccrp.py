@@ -35,8 +35,14 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import SplitResult, urlsplit, urlunsplit
 
-VERSION = "0.2.0"
+VERSION = "0.2.1"
 DEFAULT_CONFIG = "ccrp.config.json"
+DEFAULT_REPOSITORY_URL = "https://github.com/hehe0012/ccrp.git"
+DEFAULT_REPOSITORY_BRANCH = "main"
+DEFAULT_UPSTREAM_TIMEOUT = 300.0
+DEFAULT_SSH_CONNECT_TIMEOUT = 10.0
+DEFAULT_SSH_SERVER_ALIVE_INTERVAL = 30.0
+DEFAULT_SSH_SERVER_ALIVE_COUNT_MAX = 3
 HOP_BY_HOP_HEADERS = {
     "connection",
     "keep-alive",
@@ -195,16 +201,53 @@ def get_ssh_extra_args(config: dict[str, Any]) -> list[str]:
         port = ssh_cfg.get("port")
         user = ssh_cfg.get("user")
         identity_file = ssh_cfg.get("identity_file")
+        config_file = ssh_cfg.get("config_file")
         if port:
             args += ["-p", str(port)]
         if identity_file:
             args += ["-i", str(identity_file)]
+        if config_file:
+            args += ["-F", str(config_file)]
         # If user is configured and host is not already user@host, add it later in caller.
         if user:
             args += ["-l", str(user)]
+        connect_timeout = ssh_cfg.get("connect_timeout")
+        if connect_timeout is not None:
+            try:
+                connect_timeout_value = float(connect_timeout)
+            except (TypeError, ValueError):
+                raise SystemExit("ssh.connect_timeout must be a positive number of seconds")
+            if connect_timeout_value <= 0:
+                raise SystemExit("ssh.connect_timeout must be greater than 0")
+            if connect_timeout_value.is_integer():
+                connect_timeout_text = str(int(connect_timeout_value))
+            else:
+                connect_timeout_text = str(connect_timeout_value)
+            args += ["-o", f"ConnectTimeout={connect_timeout_text}"]
         for opt in ssh_cfg.get("options", []) or []:
+            # OpenSSH generally uses the first obtained value; let the explicit
+            # config field take precedence over legacy options entries.
+            if connect_timeout is not None and str(opt).lower().startswith("connecttimeout="):
+                continue
             args += ["-o", str(opt)]
     return args
+
+
+def get_ssh_keepalive(config: dict[str, Any]) -> tuple[float, int]:
+    """Return SSH keepalive interval and missed-response limit."""
+    ssh_cfg = config.get("ssh", {})
+    if not isinstance(ssh_cfg, dict):
+        ssh_cfg = {}
+    interval_raw = ssh_cfg.get("server_alive_interval", DEFAULT_SSH_SERVER_ALIVE_INTERVAL)
+    count_raw = ssh_cfg.get("server_alive_count_max", DEFAULT_SSH_SERVER_ALIVE_COUNT_MAX)
+    try:
+        interval = float(interval_raw)
+        count = int(count_raw)
+    except (TypeError, ValueError):
+        raise SystemExit("ssh.server_alive_interval and ssh.server_alive_count_max must be numeric")
+    if interval < 0 or count < 1:
+        raise SystemExit("ssh.server_alive_interval must be >= 0 and ssh.server_alive_count_max must be >= 1")
+    return interval, count
 
 
 def ssh_base_command(config: dict[str, Any], ssh_host: str | None = None) -> list[str]:
@@ -307,6 +350,21 @@ def get_tls_config(config: dict[str, Any]) -> dict[str, Any]:
     return tls if isinstance(tls, dict) else {}
 
 
+def get_upstream_timeout(config: dict[str, Any], override: float | None = None) -> float:
+    """Return the HTTP upstream connect/read inactivity timeout in seconds."""
+    proxy_cfg = config.get("server_proxy", {})
+    if not isinstance(proxy_cfg, dict):
+        proxy_cfg = {}
+    raw = override if override is not None else proxy_cfg.get("upstream_timeout", DEFAULT_UPSTREAM_TIMEOUT)
+    try:
+        timeout = float(raw)
+    except (TypeError, ValueError):
+        raise SystemExit("server_proxy.upstream_timeout must be a positive number of seconds")
+    if timeout <= 0:
+        raise SystemExit("server_proxy.upstream_timeout must be greater than 0")
+    return timeout
+
+
 def transform_path(original: str, route: Route) -> str:
     split = urlsplit(original)
     path = split.path or "/"
@@ -327,6 +385,7 @@ class ReverseProxyHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     routes: list[Route] = []
     auth_token: str | None = None
+    upstream_timeout: float = DEFAULT_UPSTREAM_TIMEOUT
     server_version = f"ccrp/{VERSION}"
 
     def log_message(self, fmt: str, *args: Any) -> None:
@@ -441,7 +500,11 @@ class ReverseProxyHandler(BaseHTTPRequestHandler):
         headers.setdefault("X-Forwarded-Proto", "https" if isinstance(self.request, ssl.SSLSocket) else "http")
 
         target_path = transform_path(self.path, route)
-        conn = http.client.HTTPConnection(route.remote_forward.host, route.remote_forward.port, timeout=60)
+        conn = http.client.HTTPConnection(
+            route.remote_forward.host,
+            route.remote_forward.port,
+            timeout=self.upstream_timeout,
+        )
         try:
             conn.request(self.command, target_path, body=body, headers=headers)
             resp = conn.getresponse()
@@ -484,6 +547,7 @@ def run_server(args: argparse.Namespace) -> int:
     listen = parse_endpoint(listen_raw, default_host="0.0.0.0")
     ReverseProxyHandler.routes = routes
     ReverseProxyHandler.auth_token = get_auth_token(config)
+    ReverseProxyHandler.upstream_timeout = get_upstream_timeout(config, args.upstream_timeout)
     httpd = ThreadingHTTPServer((listen.host, listen.port), ReverseProxyHandler)
     tls = get_tls_config(config)
     scheme = "http"
@@ -502,6 +566,7 @@ def run_server(args: argparse.Namespace) -> int:
     for r in routes:
         host_part = f" host={r.host}" if r.host else ""
         print(f"  route {r.name}:{host_part} path={r.path_prefix} -> {r.remote_forward}")
+    print(f"  upstream timeout: {ReverseProxyHandler.upstream_timeout:g}s")
     try:
         httpd.serve_forever(poll_interval=0.5)
     except KeyboardInterrupt:
@@ -513,6 +578,7 @@ def run_server(args: argparse.Namespace) -> int:
 
 def build_ssh_tunnel_command(config: dict[str, Any], ssh_host: str | None = None) -> list[str]:
     routes = get_routes(config)
+    alive_interval, alive_count_max = get_ssh_keepalive(config)
     cmd = [
         "ssh",
         *get_ssh_extra_args(config),
@@ -521,9 +587,9 @@ def build_ssh_tunnel_command(config: dict[str, Any], ssh_host: str | None = None
         "-o",
         "ExitOnForwardFailure=yes",
         "-o",
-        "ServerAliveInterval=30",
+        f"ServerAliveInterval={alive_interval:g}",
         "-o",
-        "ServerAliveCountMax=3",
+        f"ServerAliveCountMax={alive_count_max}",
     ]
     for route in routes:
         rf = route.remote_forward
@@ -655,13 +721,67 @@ def remote_home(config: dict[str, Any], ssh_host: str | None) -> str:
     return home
 
 
+def resolve_remote_dir(home: str, raw_dir: str | None) -> str | None:
+    if not raw_dir:
+        return None
+    remote_dir = raw_dir.rstrip("/") or "/"
+    if remote_dir == "~":
+        return home
+    if remote_dir.startswith("~/"):
+        return home + remote_dir[1:]
+    return remote_dir
+
+
+def build_repository_sync_command(repository_url: str, branch: str, remote_dir: str) -> str:
+    """Clone the repository or fast-forward an existing checkout in place."""
+    repo_dir = shlex.quote(remote_dir)
+    parent_dir = posixpath.dirname(remote_dir.rstrip("/")) or "/"
+    parent = shlex.quote(parent_dir)
+    url = shlex.quote(repository_url)
+    branch_arg = shlex.quote(branch)
+    return "\n".join(
+        [
+            "set -eu",
+            f"repo_dir={repo_dir}",
+            f"repo_url={url}",
+            f"repo_branch={branch_arg}",
+            f"mkdir -p {parent}",
+            'if [ -d "$repo_dir/.git" ]; then',
+            '  if git -C "$repo_dir" remote get-url origin >/dev/null 2>&1; then',
+            '    git -C "$repo_dir" remote set-url origin "$repo_url"',
+            '  else',
+            '    git -C "$repo_dir" remote add origin "$repo_url"',
+            '  fi',
+            '  git -C "$repo_dir" fetch --prune origin "$repo_branch"',
+            '  git -C "$repo_dir" checkout "$repo_branch" 2>/dev/null || git -C "$repo_dir" checkout -b "$repo_branch" "origin/$repo_branch"',
+            '  git -C "$repo_dir" pull --ff-only origin "$repo_branch"',
+            'elif [ -e "$repo_dir" ] && [ -n "$(find "$repo_dir" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]; then',
+            '  echo "remote deployment directory exists and is not an empty Git checkout" >&2',
+            "  exit 2",
+            "else",
+            '  git clone --branch "$repo_branch" --single-branch "$repo_url" "$repo_dir"',
+            "fi",
+            'printf "repository revision: "',
+            'git -C "$repo_dir" rev-parse --short HEAD',
+        ]
+    )
+
+
 def install_server(args: argparse.Namespace) -> int:
     config_path = Path(args.config)
     config = load_config(config_path)
     host = get_ssh_host(config, args.ssh)
     home = remote_home(config, host)
-    remote_bin = args.remote_bin or f"{home}/.local/bin/ccrp.py"
-    remote_config = args.remote_config or f"{home}/.config/ccrp/config.json"
+    remote_dir = resolve_remote_dir(home, args.remote_dir)
+    if remote_dir:
+        print(f"  repository:    {args.repo_url} ({args.branch})")
+        sync_cmd = build_repository_sync_command(args.repo_url, args.branch, remote_dir)
+        proc = remote_run(config, host, sync_cmd, timeout=180)
+        require_success(proc, "clone or update repository")
+        if proc.stdout.strip():
+            print(proc.stdout.strip())
+    remote_bin = args.remote_bin or (f"{remote_dir}/ccrp.py" if remote_dir else f"{home}/.local/bin/ccrp.py")
+    remote_config = args.remote_config or (f"{remote_dir}/ccrp.config.json" if remote_dir else f"{home}/.config/ccrp/config.json")
 
     print(f"installing server helper on {host}")
     print(f"  remote_bin:    {remote_bin}")
@@ -671,9 +791,10 @@ def install_server(args: argparse.Namespace) -> int:
     proc = remote_run(config, host, mkdir_cmd, timeout=30)
     require_success(proc, "create remote directories")
 
-    script_text = Path(__file__).read_text(encoding="utf-8")
-    proc = remote_run(config, host, f"cat > {shlex.quote(remote_bin)} && chmod 755 {shlex.quote(remote_bin)}", input_text=script_text, timeout=60)
-    require_success(proc, "upload ccrp.py")
+    if not remote_dir:
+        script_text = Path(__file__).read_text(encoding="utf-8")
+        proc = remote_run(config, host, f"cat > {shlex.quote(remote_bin)} && chmod 755 {shlex.quote(remote_bin)}", input_text=script_text, timeout=60)
+        require_success(proc, "upload ccrp.py")
 
     # Store a copy of the JSON config for the server proxy. The local-only fields
     # are harmless; the server command uses routes[*].remote_forward and
@@ -747,10 +868,13 @@ def cmd_init(args: argparse.Namespace) -> int:
     config = {
         "ssh": {
             "host": args.ssh,
-            "options": ["ConnectTimeout=10"],
+            "connect_timeout": args.ssh_connect_timeout,
+            "server_alive_interval": DEFAULT_SSH_SERVER_ALIVE_INTERVAL,
+            "server_alive_count_max": DEFAULT_SSH_SERVER_ALIVE_COUNT_MAX,
         },
         "server_proxy": {
             "listen": args.listen,
+            "upstream_timeout": args.upstream_timeout,
         },
         "routes": [
             {
@@ -781,6 +905,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--out", default=DEFAULT_CONFIG, help="output config path")
     p.add_argument("--force", action="store_true", help="overwrite existing config")
     p.add_argument("--ssh", default="server", help="SSH host alias, e.g. my-server or h102")
+    p.add_argument("--ssh-connect-timeout", type=float, default=10.0, help="SSH connection timeout in seconds")
     p.add_argument("--name", default="cc-switch", help="route name")
     p.add_argument("--local", default="127.0.0.1:3456", help="local cc-switch address, host:port or URL")
     p.add_argument("--remote-port", type=int, default=18080, help="server loopback port used by SSH -R")
@@ -788,6 +913,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--path-prefix", default="/", help="public path prefix")
     p.add_argument("--strip-path-prefix", action="store_true", help="strip public prefix before proxying upstream")
     p.add_argument("--target-path-prefix", default="", help="prefix added to upstream requests")
+    p.add_argument("--upstream-timeout", type=float, default=DEFAULT_UPSTREAM_TIMEOUT, help="server upstream timeout in seconds")
     p.set_defaults(func=cmd_init)
 
     p = sub.add_parser("doctor", help="check local route, ssh, and remote Python")
@@ -813,6 +939,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("server", help="run the server-side HTTP reverse proxy")
     p.add_argument("-c", "--config", default=DEFAULT_CONFIG)
     p.add_argument("--listen", help="override server_proxy.listen")
+    p.add_argument("--upstream-timeout", type=float, help="override server_proxy.upstream_timeout in seconds")
     p.set_defaults(func=run_server)
 
     p = sub.add_parser("install-server", help="upload server helper/config over SSH")
@@ -820,6 +947,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--ssh", help="override SSH host")
     p.add_argument("--remote-bin", help="remote ccrp.py path")
     p.add_argument("--remote-config", help="remote config path")
+    p.add_argument("--remote-dir", help="remote repository directory; supports ~/...")
+    p.add_argument("--repo-url", default=DEFAULT_REPOSITORY_URL, help="repository URL to clone on the server")
+    p.add_argument("--branch", default=DEFAULT_REPOSITORY_BRANCH, help="repository branch to clone or update")
     p.add_argument("--tmux", action="store_true", help="install and start the server proxy in a tmux session")
     p.add_argument("--tmux-session", default="ccrp-server", help="tmux session name for --tmux")
     p.add_argument("--systemd-user", action="store_true", help="install and start a user systemd service")
