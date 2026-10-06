@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import os
 import queue
-import shlex
 import subprocess
 import sys
 import threading
@@ -148,8 +147,9 @@ class CcrpGui:
         ttk.Label(deploy_frame, text="远程文件夹").grid(row=0, column=0, padx=6, pady=5, sticky="w")
         ttk.Entry(deploy_frame, textvariable=self.remote_dir).grid(row=0, column=1, padx=6, pady=5, sticky="ew")
         ttk.Button(deploy_frame, text="读取服务器目录", command=self.load_remote_dirs).grid(row=0, column=2, padx=4, pady=5)
-        ttk.Button(deploy_frame, text="部署并启动服务", command=self.deploy).grid(row=0, column=3, padx=6, pady=5)
-        ttk.Label(deploy_frame, text="可输入 ~/software/ccrp，也可从服务器家目录选择").grid(row=1, column=1, columnspan=3, padx=6, pady=(0, 5), sticky="w")
+        ttk.Button(deploy_frame, text="部署/更新服务", command=self.deploy).grid(row=0, column=3, padx=4, pady=5)
+        ttk.Button(deploy_frame, text="启动服务", command=self.start_server).grid(row=0, column=4, padx=4, pady=5)
+        ttk.Label(deploy_frame, text="可输入 ~/your_path，也可从服务器家目录选择").grid(row=1, column=1, columnspan=4, padx=6, pady=(0, 5), sticky="w")
         ttk.Label(deploy_frame, text="仓库地址").grid(row=2, column=0, padx=6, pady=5, sticky="w")
         self.repo_url = tk.StringVar(value=ccrp.DEFAULT_REPOSITORY_URL)
         ttk.Entry(deploy_frame, textvariable=self.repo_url).grid(row=2, column=1, padx=6, pady=5, sticky="ew")
@@ -186,7 +186,7 @@ class CcrpGui:
         ttk.Button(button_row, text="保存配置", command=self.save_config).pack(side="left", padx=(0, 6))
         ttk.Button(button_row, text="启动本地隧道", command=self.start_tunnel).pack(side="left", padx=6)
         ttk.Button(button_row, text="停止本地隧道", command=self.stop_tunnel).pack(side="left", padx=6)
-        ttk.Button(button_row, text="重启服务器服务", command=self.restart_server).pack(side="left", padx=6)
+        ttk.Button(button_row, text="重启服务器服务", command=self.start_server).pack(side="left", padx=6)
         ttk.Button(button_row, text="立即检查", command=self.check_now).pack(side="left", padx=6)
         ttk.Label(button_row, text="配置文件").pack(side="left", padx=(18, 4))
         ttk.Entry(button_row, textvariable=self.config_path, width=35).pack(side="left", fill="x", expand=True)
@@ -358,17 +358,16 @@ class CcrpGui:
             if not repo_url or not repo_branch:
                 raise ValueError("请填写仓库地址和分支")
             command = [
-                *self.ccrp_command("install-server"),
+                *self.ccrp_command("deploy-server"),
                 "-c", str(path),
                 "--remote-dir", remote_dir,
                 "--repo-url", repo_url,
                 "--branch", repo_branch,
-                "--tmux",
             ]
         except (ValueError, OSError) as exc:
             messagebox.showerror("配置错误", str(exc))
             return
-        self.run_async("开始部署服务器端 CCRP", lambda: self.run_stream_command(command, "服务器部署"))
+        self.run_async("开始部署/更新服务器端 CCRP（不会启动服务）", lambda: self.run_stream_command(command, "服务器部署/更新"))
 
     def test_ssh(self) -> None:
         try:
@@ -483,26 +482,25 @@ class CcrpGui:
         else:
             self.log_line("本地隧道当前未运行")
 
-    def restart_server(self) -> None:
+    def start_server(self) -> None:
         try:
-            self.save_config(False)
+            path = self.save_config(False)
             remote_dir = self.remote_dir.get().strip().rstrip("/")
             if not remote_dir:
                 raise ValueError("请填写服务器部署文件夹")
-            q_session = shlex.quote("ccrp-server")
-            if remote_dir == "~":
-                cd_path = '"$HOME"'
-            elif remote_dir.startswith("~/"):
-                cd_path = '"$HOME"/' + shlex.quote(remote_dir[2:])
-            else:
-                cd_path = shlex.quote(remote_dir)
-            start = f"cd {cd_path} && python3 ./ccrp.py server --config ./ccrp.config.json"
-            remote_command = f"tmux kill-session -t {q_session} 2>/dev/null || true; tmux new-session -d -s {q_session} {shlex.quote(start)}"
-            command = self.ssh_command(remote_command)
+            command = [
+                *self.ccrp_command("start-server"),
+                "-c", str(path),
+                "--remote-dir", remote_dir,
+            ]
         except (ValueError, OSError) as exc:
             messagebox.showerror("配置错误", str(exc))
             return
-        self.run_async("重启服务器端 CCRP", lambda: self.run_stream_command(command, "服务器服务重启"))
+        self.run_async("启动/重启服务器端 CCRP（不更新代码）", lambda: self.run_stream_command(command, "服务器服务启动"))
+
+    def restart_server(self) -> None:
+        """Backward-compatible alias for callers that used the old method name."""
+        self.start_server()
 
     def remote_status(self) -> tuple[bool, str, str, bool]:
         config = self.command_config()

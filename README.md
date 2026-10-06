@@ -13,7 +13,7 @@
 1. 读取指定的 OpenSSH 配置文件，列出其中的 `Host` 目标并选择服务器。
 2. 通过 SSH 读取服务器家目录下的文件夹，选择 CCRP 部署目录。
 3. 在界面中设置本地 cc-switch 端口、SSH 反向端口、服务器代理端口和超时参数。
-4. 在服务器指定目录克隆或更新 GitHub 仓库，将配置写入仓库目录，并在 tmux 会话中启动 CCRP 服务。
+4. 在服务器指定目录部署或更新 GitHub 仓库，并单独启动 CCRP 服务。
 5. 启动和停止本地 SSH 反向隧道，周期性检查隧道、服务器健康接口和两个服务器端口。
 
 启动方式：
@@ -33,7 +33,7 @@ ccrp-gui
 
 GUI 不保存 SSH 密码和私钥。SSH 登录仍由 OpenSSH 配置、Windows ssh-agent 或系统凭据完成。选择的 SSH 配置文件会通过 `ssh -F` 传给底层命令。服务器需要有 `git`、`python3` 和 `tmux`；`curl` 和 `ss` 主要用于界面监控。
 
-GUI 的典型使用顺序是：选择 SSH 配置文件并读取目标 -> 选择目标服务器 -> 输入或读取远程部署目录 -> 设置仓库地址、分支、端口和超时 -> 点击“部署并启动服务” -> 点击“启动本地隧道”。部署完成后，底部状态栏会每 5 秒刷新一次。
+GUI 的典型使用顺序是：选择 SSH 配置文件并读取目标 -> 选择目标服务器 -> 输入或读取远程部署目录 -> 设置仓库地址、分支、端口和超时 -> 点击“部署/更新服务” -> 点击“启动服务” -> 点击“启动本地隧道”。部署和启动是两个独立操作，底部状态栏会每 5 秒刷新一次。
 
 源码构建 Windows 版本需要安装 PyInstaller：
 
@@ -51,7 +51,7 @@ python -m PyInstaller --noconfirm --clean --onefile --windowed --name ccrp-gui c
 本地 cc-switch：       127.0.0.1:15721
 服务器 SSH 反向端口：  127.0.0.1:18082
 服务器 ccrp 代理端口：127.0.0.1:18083
-服务器配置：           ~/software/SSHRev/ccrp.config.json
+服务器配置：           ~/your_path/ccrp.config.json
 本地配置：             D:\workspace\projects\SSHRev\ccrp.h102-15721-fresh.json
 SSH 主机别名：         h102
 ```
@@ -114,19 +114,18 @@ python .\ccrp.py print-ssh `
 ```
 
 如果看到的是 `18080`，说明使用了旧配置或生成参数不对，需要重新生成配置。
-## 二、从本地一键克隆部署服务器
+## 二、从本地部署或更新服务器代码
 
-服务端部署由本地 `install-server` 命令通过 SSH 完成。它会先在服务器指定目录克隆仓库；如果目录已经是 Git 仓库，则校正 `origin` 并快进更新指定分支。随后把本地配置写到克隆目录的 `ccrp.config.json`，并在 tmux 会话中启动仓库里的 `ccrp.py`。
+服务端部署由本地 `deploy-server` 命令通过 SSH 完成。它会检测服务器指定目录：目录不存在或为空时执行 `git clone`，目录已经是该仓库的 Git 检出时执行快进更新；非空但不是 Git 仓库时会拒绝操作。部署命令会上传配置，但不会启动服务。
 
-首次部署和后续更新都可以使用同一条命令：
+首次部署和后续更新都使用同一条命令：
 
 ```powershell
-python .\ccrp.py install-server `
+python .\ccrp.py deploy-server `
   --config .\ccrp.h102-15721-fresh.json `
-  --remote-dir ~/software/SSHRev `
+  --remote-dir ~/your_path `
   --repo-url https://github.com/hehe0012/ccrp.git `
-  --branch main `
-  --tmux
+  --branch main
 ```
 
 如果仓库是公开仓库，可直接使用上面的 HTTPS 地址。私有仓库应改用服务器已配置 SSH key 的地址，例如 `git@github.com:hehe0012/ccrp.git`，并确认服务器上的 SSH key 有读取权限。不要把 GitHub Token 明文写入命令历史、仓库、README 或聊天内容。
@@ -135,18 +134,31 @@ python .\ccrp.py install-server `
 
 - 服务器必须安装 `git`、`python3` 和 `tmux`，并能访问 GitHub。
 - 首次部署时，目标目录不存在或为空，命令会执行 `git clone`。
-- 后续部署时，命令会把 `origin` 设置为 `--repo-url`，抓取指定分支并通过 `git pull --ff-only` 更新。若本地有无法快进的提交，更新会失败，不会重置或覆盖这些提交。
+- 后续部署时，命令会检查现有仓库的 `origin` 是否与 `--repo-url` 一致，然后抓取指定分支并通过 `git pull --ff-only` 更新。仓库来源不一致、缺少 `origin` 或本地有无法快进的提交时，更新会失败，不会重置或覆盖这些内容。
 - 目标目录非空且不是 Git 仓库时会拒绝部署，不会删除或覆盖目录内容。
-- 每次部署会重新写入克隆目录下的 `ccrp.config.json`，并重启 `ccrp-server` tmux 会话。
+- 每次部署会重新写入克隆目录下的 `ccrp.config.json`，但不会启动或重启 `ccrp-server`。
 
 GUI 中的“仓库地址”和“分支”默认分别为 `https://github.com/hehe0012/ccrp.git` 与 `main`，可以按部署目标修改。
 
-部署成功后，命令输出会显示仓库 revision、远程配置路径和 tmux 会话。服务器端运行配置默认为 `~/software/SSHRev/ccrp.config.json`；如需使用已有配置文件，请在 GUI 中调整相应配置，或通过 CLI 的 `--remote-config` 指定目标路径。
+部署成功后，命令输出会显示仓库 revision 和远程配置路径。服务器端运行配置默认为 `~/your_path/ccrp.config.json`；如需使用已有配置文件，请通过 CLI 的 `--remote-config` 指定目标路径。
+
+## 三、单独启动服务器服务
+
+部署完成后，使用 `start-server` 启动或重启服务器端 `ccrp-server`。该命令只检查目标目录中的 `ccrp.py` 和配置文件，然后创建 tmux 会话，不会执行 `git clone`、`git pull` 或更新仓库：
+
+```powershell
+python .\ccrp.py start-server `
+  --config .\ccrp.h102-15721-fresh.json `
+  --remote-dir ~/your_path `
+  --tmux-session ccrp-server
+```
+
+如果服务器尚未部署，启动命令会明确报错，此时先运行上一节的 `deploy-server`。默认会先停止同名旧 tmux 会话再启动；使用 `--no-restart` 可以在已有会话时拒绝重启。
 
 服务器端部署目录和运行配置确认命令：
 
 ```bash
-cd ~/software/SSHRev
+cd ~/your_path
 git remote -v
 git log -1 --oneline
 python3 --version
@@ -200,7 +212,7 @@ python .\ccrp.py init `
 
 修改 `upstream_timeout` 后，必须在服务器端让正在运行的 `ccrp server` 重新读取配置：停止并重启对应的 tmux 会话（见下方启动步骤）。仅修改本地 JSON 不会改变已经运行的服务器进程。
 
-如需在服务器上手动生成配置（一般 GUI/`install-server` 已经自动上传配置），可执行：
+如需在服务器上手动生成配置（一般 GUI/`deploy-server` 已经自动上传配置），可执行：
 
 ```bash
 python3 ccrp.py init \
@@ -212,22 +224,22 @@ python3 ccrp.py init \
   --force
 ```
 
-## 三、检查服务器端 ccrp
+## 四、检查服务器端 ccrp
 
 服务器端直接使用 `tmux` 启动 `ccrp.py server`：
 
 ```bash
-cd ~/software/SSHRev
+cd ~/your_path
 tmux kill-session -t ccrp-server 2>/dev/null || true
 tmux new-session -d -s ccrp-server \
-  "cd \$HOME/software/SSHRev && python3 ccrp.py server --config ./ccrp.config.json"
+  "cd \$HOME/your_path && python3 ccrp.py server --config ./ccrp.config.json"
 ```
 
 也可以临时覆盖配置文件中的上游等待时间，不修改 JSON：
 
 ```bash
 tmux new-session -d -s ccrp-server \
-  "cd \$HOME/software/SSHRev && python3 ccrp.py server --config ./ccrp.config.json --upstream-timeout 300"
+  "cd \$HOME/your_path && python3 ccrp.py server --config ./ccrp.config.json --upstream-timeout 300"
 ```
 
 如果配置文件中已经设置了 `server_proxy.upstream_timeout`，通常不需要这个命令行覆盖参数。
@@ -274,7 +286,7 @@ python3 ccrp.py server --config ./ccrp.config.json
 OSError: [Errno 98] Address already in use
 ```
 
-## 四、本地 Windows 启动 SSH 反向隧道
+## 五、本地 Windows 启动 SSH 反向隧道
 
 服务器端启动后，在本地 Windows 打开新的 PowerShell 窗口：
 
@@ -330,7 +342,7 @@ python .\ccrp.py print-ssh `
 -R 127.0.0.1:18082:127.0.0.1:15721
 ```
 
-## 五、确认两个服务器端口
+## 六、确认两个服务器端口
 
 回到服务器执行：
 
@@ -360,7 +372,7 @@ ss -lnt | grep -E '18082|18083'
 
 如果看到 `18080` 而不是 `18082`，说明仍有旧的隧道进程或旧配置在运行。停止本地旧的 `ccrp.py up`，再使用正确配置重新启动。
 
-## 六、按层测试代理
+## 七、按层测试代理
 
 ### 1. 测试 SSH 反向隧道
 
@@ -385,7 +397,7 @@ curl -i http://127.0.0.1:18083/v1/models
 
 第一个请求验证服务器代理自身，第二个请求验证完整转发。
 
-## 七、确认 Codex 配置
+## 八、确认 Codex 配置
 
 服务器执行：
 
@@ -447,7 +459,7 @@ if path.exists():
 PY
 ```
 
-## 八、测试 Codex
+## 九、测试 Codex
 
 ```bash
 command -v codex
@@ -474,17 +486,28 @@ codex exec "请只回复 CCRP_CODEX_OK，不要输出其他内容。"
 CCRP_CODEX_OK
 ```
 
-## 九、日常启动流程
+## 十、日常启动流程
 
 ### 服务器端
 
+在本地 Windows 端先部署/更新代码，再单独启动服务：
+
+```powershell
+python .\ccrp.py deploy-server `
+  --config .\ccrp.h102-15721-fresh.json `
+  --remote-dir ~/your_path `
+  --repo-url https://github.com/hehe0012/ccrp.git `
+  --branch main
+
+python .\ccrp.py start-server `
+  --config .\ccrp.h102-15721-fresh.json `
+  --remote-dir ~/your_path
+```
+
+在服务器上检查健康状态：
+
 ```bash
-ssh h102
-cd ~/software/SSHRev
-tmux kill-session -t ccrp-server 2>/dev/null || true
-tmux new-session -d -s ccrp-server \
-  "cd \$HOME/software/SSHRev && python3 ccrp.py server --config ./ccrp.config.json"
-curl -sS http://127.0.0.1:18083/__ccrp/health
+ssh h102 'curl -sS http://127.0.0.1:18083/__ccrp/health'
 ```
 
 ### 本地 Windows
@@ -510,7 +533,7 @@ codex exec --skip-git-repo-check \
   "请只回复 CCRP_CODEX_OK，不要输出其他内容。"
 ```
 
-## 十、停止流程
+## 十一、停止流程
 
 ### 停止本地 SSH 隧道
 

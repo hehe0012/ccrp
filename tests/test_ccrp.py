@@ -110,8 +110,37 @@ class CcrpConfigTests(unittest.TestCase):
         self.assertIn("git clone --branch \"$repo_branch\"", command)
         self.assertIn('git -C "$repo_dir" fetch --prune origin "$repo_branch"', command)
         self.assertIn('git -C "$repo_dir" pull --ff-only origin "$repo_branch"', command)
-        self.assertIn('remote set-url origin "$repo_url"', command)
+        self.assertIn('current_url=$(git -C "$repo_dir" remote get-url origin', command)
+        self.assertIn('different Git repository', command)
+        self.assertNotIn('remote set-url origin', command)
         self.assertIn('repo_branch=release', command)
+
+    def test_deploy_command_does_not_start_service(self):
+        command = ccrp.build_repository_sync_command(
+            "https://github.com/example/ccrp.git", "main", "/home/test/ccrp"
+        )
+        self.assertIn("git clone", command)
+        self.assertIn("git -C", command)
+        self.assertNotIn("tmux", command)
+        self.assertNotIn("ccrp.py server", command)
+
+    def test_start_command_uses_existing_checkout_only(self):
+        command = ccrp.build_server_start_command(
+            "/home/test/ccrp", "/home/test/ccrp/ccrp.config.json"
+        )
+        self.assertIn("test -f", command)
+        self.assertIn("python3 /home/test/ccrp/ccrp.py server", command)
+        self.assertIn("tmux kill-session", command)
+        self.assertNotIn("git clone", command)
+        self.assertNotIn("git pull", command)
+
+    def test_server_command_parsers_are_separate(self):
+        parser = ccrp.build_parser()
+        deploy = parser.parse_args(["deploy-server", "--remote-dir", "~/ccrp"])
+        start = parser.parse_args(["start-server", "--remote-dir", "~/ccrp"])
+        self.assertEqual(deploy.remote_dir, "~/ccrp")
+        self.assertEqual(start.remote_dir, "~/ccrp")
+        self.assertTrue(start.restart)
 
     def test_install_server_parser_accepts_repository_options(self):
         parser = ccrp.build_parser()

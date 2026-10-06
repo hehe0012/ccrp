@@ -7,8 +7,9 @@ created by cc-switch) on a remote Linux server through SSH reverse tunnels.
 
 Typical private flow:
   1. python ccrp.py init --ssh my-server --local 127.0.0.1:3456 --remote-port 18080 --listen 127.0.0.1:8080
-  2. python ccrp.py install-server -c ccrp.config.json --tmux
-  3. python ccrp.py up -c ccrp.config.json
+  2. python ccrp.py deploy-server -c ccrp.config.json --remote-dir ~/your_path
+  3. python ccrp.py start-server -c ccrp.config.json --remote-dir ~/your_path
+  4. python ccrp.py up -c ccrp.config.json
 """
 from __future__ import annotations
 
@@ -747,10 +748,12 @@ def build_repository_sync_command(repository_url: str, branch: str, remote_dir: 
             f"repo_branch={branch_arg}",
             f"mkdir -p {parent}",
             'if [ -d "$repo_dir/.git" ]; then',
-            '  if git -C "$repo_dir" remote get-url origin >/dev/null 2>&1; then',
-            '    git -C "$repo_dir" remote set-url origin "$repo_url"',
-            '  else',
-            '    git -C "$repo_dir" remote add origin "$repo_url"',
+            '  current_url=$(git -C "$repo_dir" remote get-url origin 2>/dev/null || true)',
+            '  if [ "$current_url" != "$repo_url" ]; then',
+            '    echo "remote deployment directory is a different Git repository" >&2',
+            '    echo "expected origin: $repo_url" >&2',
+            '    echo "actual origin:   ${current_url:-<missing>}" >&2',
+            '    exit 3',
             '  fi',
             '  git -C "$repo_dir" fetch --prune origin "$repo_branch"',
             '  git -C "$repo_dir" checkout "$repo_branch" 2>/dev/null || git -C "$repo_dir" checkout -b "$repo_branch" "origin/$repo_branch"',
@@ -765,6 +768,86 @@ def build_repository_sync_command(repository_url: str, branch: str, remote_dir: 
             'git -C "$repo_dir" rev-parse --short HEAD',
         ]
     )
+
+
+def build_server_start_command(remote_dir: str, remote_config: str, session: str = "ccrp-server", *, restart: bool = True) -> str:
+    """Build a remote command that starts an already-deployed server checkout."""
+    quoted_dir = shlex.quote(remote_dir)
+    quoted_bin = shlex.quote(posixpath.join(remote_dir.rstrip("/"), "ccrp.py"))
+    quoted_config = shlex.quote(remote_config)
+    quoted_session = shlex.quote(session)
+    start_cmd = " ".join(
+        shlex.quote(part)
+        for part in ["python3", posixpath.join(remote_dir.rstrip("/"), "ccrp.py"), "server", "--config", remote_config]
+    )
+    stop_cmd = f"tmux kill-session -t {quoted_session} 2>/dev/null || true; " if restart else ""
+    return "\n".join(
+        [
+            "set -eu",
+            f"test -f {quoted_bin} || {{ echo 'ccrp.py not found in deployed directory' >&2; exit 2; }}",
+            f"test -f {quoted_config} || {{ echo 'server config not found' >&2; exit 2; }}",
+            stop_cmd + f"tmux new-session -d -s {quoted_session} -c {quoted_dir} {shlex.quote(start_cmd)}",
+            f"tmux list-sessions | grep -- {quoted_session}",
+        ]
+    )
+
+
+def deploy_server(args: argparse.Namespace) -> int:
+    """Clone/update a server checkout and upload its config, without starting it."""
+    config_path = Path(args.config)
+    config = load_config(config_path)
+    host = get_ssh_host(config, args.ssh)
+    home = remote_home(config, host)
+    remote_dir = resolve_remote_dir(home, args.remote_dir)
+    if not remote_dir:
+        raise SystemExit("deploy-server requires --remote-dir")
+
+    print(f"deploying repository on {host}")
+    print(f"  repository:    {args.repo_url} ({args.branch})")
+    print(f"  remote_dir:    {remote_dir}")
+    proc = remote_run(
+        config,
+        host,
+        build_repository_sync_command(args.repo_url, args.branch, remote_dir),
+        timeout=180,
+    )
+    require_success(proc, "clone or update repository")
+    if proc.stdout.strip():
+        print(proc.stdout.strip())
+
+    remote_config = args.remote_config or posixpath.join(remote_dir, "ccrp.config.json")
+    parent_dir = posixpath.dirname(remote_config) or "/"
+    proc = remote_run(config, host, f"mkdir -p {shlex.quote(parent_dir)}", timeout=30)
+    require_success(proc, "create remote config directory")
+    config_text = json.dumps(config, ensure_ascii=False, indent=2) + "\n"
+    proc = remote_run(config, host, f"cat > {shlex.quote(remote_config)}", input_text=config_text, timeout=60)
+    require_success(proc, "upload server config")
+    print(f"remote_config:  {remote_config}")
+    print("deployment complete; server was not started")
+    return 0
+
+
+def start_server(args: argparse.Namespace) -> int:
+    """Start/restart a server checkout that was deployed previously."""
+    config = load_config(Path(args.config))
+    host = get_ssh_host(config, args.ssh)
+    home = remote_home(config, host)
+    remote_dir = resolve_remote_dir(home, args.remote_dir)
+    if not remote_dir:
+        raise SystemExit("start-server requires --remote-dir")
+    remote_config = args.remote_config or posixpath.join(remote_dir, "ccrp.config.json")
+    session = args.tmux_session
+    command = build_server_start_command(remote_dir, remote_config, session, restart=args.restart)
+    print(f"starting server service on {host}")
+    print(f"  remote_dir:    {remote_dir}")
+    print(f"  remote_config: {remote_config}")
+    print(f"  tmux_session:  {session}")
+    proc = remote_run(config, host, command, timeout=60)
+    require_success(proc, "start server service")
+    if proc.stdout.strip():
+        print(proc.stdout.strip())
+    print("server service started")
+    return 0
 
 
 def install_server(args: argparse.Namespace) -> int:
@@ -942,7 +1025,25 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--upstream-timeout", type=float, help="override server_proxy.upstream_timeout in seconds")
     p.set_defaults(func=run_server)
 
-    p = sub.add_parser("install-server", help="upload server helper/config over SSH")
+    p = sub.add_parser("deploy-server", help="clone or update the server repository and upload config")
+    p.add_argument("-c", "--config", default=DEFAULT_CONFIG)
+    p.add_argument("--ssh", help="override SSH host")
+    p.add_argument("--remote-dir", required=True, help="remote repository directory; supports ~/...")
+    p.add_argument("--remote-config", help="remote config path; defaults to <remote-dir>/ccrp.config.json")
+    p.add_argument("--repo-url", default=DEFAULT_REPOSITORY_URL, help="repository URL to clone on the server")
+    p.add_argument("--branch", default=DEFAULT_REPOSITORY_BRANCH, help="repository branch to clone or update")
+    p.set_defaults(func=deploy_server)
+
+    p = sub.add_parser("start-server", help="start or restart the deployed server service")
+    p.add_argument("-c", "--config", default=DEFAULT_CONFIG)
+    p.add_argument("--ssh", help="override SSH host")
+    p.add_argument("--remote-dir", required=True, help="remote repository directory; supports ~/...")
+    p.add_argument("--remote-config", help="remote config path; defaults to <remote-dir>/ccrp.config.json")
+    p.add_argument("--tmux-session", default="ccrp-server", help="tmux session name")
+    p.add_argument("--no-restart", dest="restart", action="store_false", help="fail if the tmux session already exists")
+    p.set_defaults(func=start_server, restart=True)
+
+    p = sub.add_parser("install-server", help="legacy combined server deployment command")
     p.add_argument("-c", "--config", default=DEFAULT_CONFIG)
     p.add_argument("--ssh", help="override SSH host")
     p.add_argument("--remote-bin", help="remote ccrp.py path")
