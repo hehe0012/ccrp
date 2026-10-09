@@ -255,6 +255,20 @@ def ssh_base_command(config: dict[str, Any], ssh_host: str | None = None) -> lis
     return ["ssh", *get_ssh_extra_args(config), get_ssh_host(config, ssh_host)]
 
 
+def ssh_probe_command(config: dict[str, Any], ssh_host: str | None = None) -> list[str]:
+    """Build a non-interactive SSH command for short remote probes."""
+    command = ["ssh", *get_ssh_extra_args(config)]
+    alive_interval, alive_count_max = get_ssh_keepalive(config)
+    command += [
+        "-o", "BatchMode=yes",
+        "-o", "RequestTTY=no",
+        "-o", "ConnectionAttempts=1",
+        "-o", f"ServerAliveInterval={alive_interval:g}",
+        "-o", f"ServerAliveCountMax={alive_count_max}",
+    ]
+    return [*command, get_ssh_host(config, ssh_host)]
+
+
 def check_tcp(endpoint: Endpoint, timeout: float = 2.0) -> tuple[bool, str]:
     try:
         with socket.create_connection((endpoint.host, endpoint.port), timeout=timeout):

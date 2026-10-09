@@ -92,6 +92,32 @@ class CcrpConfigTests(unittest.TestCase):
         self.assertIn("-F", ccrp.ssh_base_command(config))
         self.assertIn("C:/Users/test/.ssh/config", ccrp.ssh_base_command(config))
 
+    def test_ssh_probe_command_is_noninteractive(self):
+        command = ccrp.ssh_probe_command(
+            {"ssh": {"host": "my-server", "server_alive_interval": 12, "server_alive_count_max": 2}},
+            "my-server",
+        )
+        self.assertIn("BatchMode=yes", command)
+        self.assertIn("RequestTTY=no", command)
+        self.assertIn("ConnectionAttempts=1", command)
+        self.assertIn("ServerAliveInterval=12", command)
+        self.assertIn("ServerAliveCountMax=2", command)
+        self.assertEqual(command[-1], "my-server")
+
+    def test_listening_port_parser_requires_listen_and_exact_port(self):
+        self.assertTrue(ccrp_gui.CcrpGui._listening_port("LISTEN 0 5 127.0.0.1:18082 0.0.0.0:*", 18082))
+        self.assertTrue(ccrp_gui.CcrpGui._listening_port("LISTEN 0 5 [::1]:18083 [::]:*", 18083))
+        self.assertFalse(ccrp_gui.CcrpGui._listening_port("ESTAB 0 0 127.0.0.1:18082 127.0.0.1:1", 18082))
+        self.assertFalse(ccrp_gui.CcrpGui._listening_port("LISTEN 0 5 127.0.0.1:180820 0.0.0.0:*", 18082))
+
+    def test_http_probe_accepts_any_real_http_response(self):
+        status, ok = ccrp_gui.CcrpGui._http_probe_status("HTTP_CODE:401\n", 0)
+        self.assertEqual(status, "已打通（HTTP 401）")
+        self.assertTrue(ok)
+        status, ok = ccrp_gui.CcrpGui._http_probe_status("HTTP_CODE:000\n", 7, "Connection refused")
+        self.assertIn("未打通", status)
+        self.assertFalse(ok)
+
     def test_read_ssh_hosts_skips_patterns_and_duplicates(self):
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / "config"

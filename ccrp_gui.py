@@ -101,6 +101,7 @@ class CcrpGui:
         self.tunnel_status = tk.StringVar(value="未启动")
         self.server_status = tk.StringVar(value="未检查")
         self.port_status = tk.StringVar(value="未检查")
+        self.route_status = tk.StringVar(value="未检查")
         self.overall_status = tk.StringVar(value="未运行")
 
         self.build_ui()
@@ -204,13 +205,14 @@ class CcrpGui:
 
         status = ttk.LabelFrame(root, text="4. 运行监控")
         status.grid(row=4, column=0, padx=10, pady=(6, 10), sticky="ew")
-        for col in range(4):
+        for col in range(5):
             status.columnconfigure(col, weight=1)
         for col, (label, variable) in enumerate([
             ("总体", self.overall_status),
             ("本地隧道", self.tunnel_status),
             ("服务器健康", self.server_status),
             ("服务器端口", self.port_status),
+            ("反向链路", self.route_status),
         ]):
             ttk.Label(status, text=label).grid(row=0, column=col, padx=6, pady=(5, 0))
             ttk.Label(status, textvariable=variable).grid(row=1, column=col, padx=6, pady=(0, 6))
@@ -306,6 +308,10 @@ class CcrpGui:
     def ssh_command(self, remote_command: str) -> list[str]:
         config = self.command_config()
         return [*ccrp.ssh_base_command(config), remote_command]
+
+    def ssh_probe_command(self, remote_command: str) -> list[str]:
+        config = self.command_config()
+        return [*ccrp.ssh_probe_command(config), remote_command]
 
     def run_async(self, title: str, function: Callable[[], Any]) -> None:
         if self.worker_running:
@@ -502,21 +508,99 @@ class CcrpGui:
         """Backward-compatible alias for callers that used the old method name."""
         self.start_server()
 
-    def remote_status(self) -> tuple[bool, str, str, bool]:
+    def remote_status(self) -> tuple[bool, str, str, str, bool]:
         config = self.command_config()
         server_port = port_value(self.server_port.get(), "服务器代理端口")
         ssh_port = port_value(self.ssh_port.get(), "SSH 反向端口")
         timeout = max(5, int(positive_float(self.ssh_connect_timeout.get(), "SSH 建连秒数") + 10))
-        health_command = f"curl -fsS --max-time 8 http://127.0.0.1:{server_port}/__ccrp/health"
-        proc = subprocess.run([*ccrp.ssh_base_command(config), health_command], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout)
-        health_ok = proc.returncode == 0
-        health = "正常" if health_ok else (proc.stderr.strip() or f"失败({proc.returncode})")
-        ports_command = f"ss -lnt 2>/dev/null | grep -E ':{ssh_port} |:{server_port} ' || true"
-        ports = subprocess.run([*ccrp.ssh_base_command(config), ports_command], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout)
-        lines = [line for line in ports.stdout.splitlines() if line.strip()]
-        port_ok = any(f":{ssh_port}" in line for line in lines) and any(f":{server_port}" in line for line in lines)
+        health_command = f"curl -fsS --connect-timeout 2 --max-time 8 http://127.0.0.1:{server_port}/__ccrp/health"
+        health_ok = False
+        try:
+            proc = subprocess.run(
+                [*ccrp.ssh_probe_command(config), health_command],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=timeout,
+            )
+            health_ok = proc.returncode == 0
+            health = "正常" if health_ok else (proc.stderr.strip() or f"失败({proc.returncode})")
+        except subprocess.TimeoutExpired:
+            health = f"SSH 健康检查超时（{timeout} 秒）"
+        ports_command = f"ss -lnt 2>/dev/null || true"
+        try:
+            ports = subprocess.run(
+                [*ccrp.ssh_probe_command(config), ports_command],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=timeout,
+            )
+            lines = [line for line in ports.stdout.splitlines() if line.strip()]
+            ssh_port_ok = any(self._listening_port(line, ssh_port) for line in lines)
+            server_port_ok = any(self._listening_port(line, server_port) for line in lines)
+            ports_ok = ssh_port_ok and server_port_ok
+        except subprocess.TimeoutExpired:
+            lines = []
+            ssh_port_ok = False
+            server_port_ok = False
+            ports_ok = False
+        if not lines and not ports_ok:
+            port_status = f"SSH 端口检查超时（{timeout} 秒）" if not health_ok else "未读取到服务器监听端口"
+        else:
+            missing = []
+            if not ssh_port_ok:
+                missing.append(str(ssh_port))
+            if not server_port_ok:
+                missing.append(str(server_port))
+            port_status = "正常" if ports_ok else f"未监听端口：{', '.join(missing)}"
+        port_ok = ports_ok
         tunnel_ok = bool(self.tunnel_process and self.tunnel_process.poll() is None)
-        return tunnel_ok, health, ("正常" if port_ok else "缺少配置端口中的一个或多个监听"), health_ok and port_ok
+        route_command = (
+            f"curl -sS --connect-timeout 2 --max-time 8 "
+            f"-o /dev/null -w 'HTTP_CODE:%{{http_code}}\\n' "
+            f"http://127.0.0.1:{ssh_port}/v1/models"
+        )
+        route_ok = False
+        route_status = "未检查"
+        try:
+            route_probe = subprocess.run(
+                [*ccrp.ssh_probe_command(config), route_command],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=timeout,
+            )
+            route_status, route_ok = self._http_probe_status(route_probe.stdout, route_probe.returncode, route_probe.stderr)
+        except subprocess.TimeoutExpired:
+            route_status = f"反向端口请求超时（{timeout} 秒）"
+        remote_ok = health_ok and port_ok and route_ok
+        return tunnel_ok, health, (port_status if not port_ok else "正常"), route_status, remote_ok
+
+    @staticmethod
+    def _http_probe_status(stdout: str, returncode: int, stderr: str = "") -> tuple[str, bool]:
+        """Interpret a remote curl probe without requiring a successful HTTP status."""
+        marker = "HTTP_CODE:"
+        code_text = ""
+        for line in stdout.splitlines():
+            if line.startswith(marker):
+                code_text = line[len(marker):].strip()
+        if returncode == 0 and len(code_text) == 3 and code_text.isdigit() and code_text != "000":
+            return f"已打通（HTTP {code_text}）", True
+        detail = stderr.strip() or f"curl 退出码 {returncode}"
+        return f"未打通：{detail}", False
+
+    @staticmethod
+    def _listening_port(line: str, port: int) -> bool:
+        """Match the local address column in `ss -lnt` without substring false positives."""
+        fields = line.split()
+        if len(fields) < 4 or fields[0] != "LISTEN":
+            return False
+        local_address = fields[3]
+        return local_address.endswith(f":{port}") or local_address.endswith(f"]:{port}")
 
     def check_now(self) -> None:
         self.run_async("检查服务器状态", self.remote_status)
@@ -530,10 +614,10 @@ class CcrpGui:
     def monitor_worker(self) -> None:
         tunnel_ok = bool(self.tunnel_process and self.tunnel_process.poll() is None)
         try:
-            _tunnel_ok, health, ports, remote_ok = self.remote_status()
+            _tunnel_ok, health, ports, route, remote_ok = self.remote_status()
         except Exception as exc:  # noqa: BLE001
-            health, ports, remote_ok = f"检查失败：{exc}", "检查失败", False
-        self.events.put(("status", (tunnel_ok, health, ports, remote_ok)))
+            health, ports, route, remote_ok = f"检查失败：{exc}", "检查失败", "检查失败", False
+        self.events.put(("status", (tunnel_ok, health, ports, route, remote_ok)))
         self.events.put(("monitor_done", None))
 
     def process_events(self) -> None:
@@ -550,7 +634,7 @@ class CcrpGui:
             elif kind == "result":
                 if isinstance(payload, list):
                     self.show_remote_dirs(payload)
-                elif isinstance(payload, tuple) and len(payload) == 4:
+                elif isinstance(payload, tuple) and len(payload) == 5:
                     self.update_status(payload)
             elif kind == "status":
                 self.update_status(payload)
@@ -562,11 +646,12 @@ class CcrpGui:
                 self.worker_running = False
         self.root.after(200, self.process_events)
 
-    def update_status(self, values: tuple[bool, str, str, bool]) -> None:
-        tunnel_ok, health, ports, remote_ok = values
+    def update_status(self, values: tuple[bool, str, str, str, bool]) -> None:
+        tunnel_ok, health, ports, route, remote_ok = values
         self.tunnel_status.set("运行中" if tunnel_ok else "未运行")
         self.server_status.set(health)
         self.port_status.set(ports)
+        self.route_status.set(route)
         self.overall_status.set("正常运行" if tunnel_ok and remote_ok else "异常或未启动")
 
     def close(self) -> None:
