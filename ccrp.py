@@ -41,6 +41,8 @@ DEFAULT_CONFIG = "ccrp.config.json"
 DEFAULT_REPOSITORY_URL = "https://github.com/hehe0012/ccrp.git"
 DEFAULT_REPOSITORY_BRANCH = "main"
 DEFAULT_UPSTREAM_TIMEOUT = 300.0
+UPSTREAM_CONNECT_RETRIES = 3
+UPSTREAM_CONNECT_RETRY_DELAY = 0.25
 DEFAULT_SSH_CONNECT_TIMEOUT = 10.0
 DEFAULT_SSH_SERVER_ALIVE_INTERVAL = 30.0
 DEFAULT_SSH_SERVER_ALIVE_COUNT_MAX = 3
@@ -515,12 +517,29 @@ class ReverseProxyHandler(BaseHTTPRequestHandler):
         headers.setdefault("X-Forwarded-Proto", "https" if isinstance(self.request, ssl.SSLSocket) else "http")
 
         target_path = transform_path(self.path, route)
-        conn = http.client.HTTPConnection(
-            route.remote_forward.host,
-            route.remote_forward.port,
-            timeout=self.upstream_timeout,
-        )
         try:
+            # SSH reverse ports can disappear briefly while the local tunnel
+            # process is reconnecting. Retry only TCP connection establishment;
+            # once connected, send the request exactly once.
+            conn: http.client.HTTPConnection | None = None
+            last_error: OSError | None = None
+            for attempt in range(UPSTREAM_CONNECT_RETRIES):
+                conn = http.client.HTTPConnection(
+                    route.remote_forward.host,
+                    route.remote_forward.port,
+                    timeout=self.upstream_timeout,
+                )
+                try:
+                    conn.connect()
+                    last_error = None
+                    break
+                except OSError as exc:
+                    last_error = exc
+                    conn.close()
+                    if attempt + 1 < UPSTREAM_CONNECT_RETRIES:
+                        time.sleep(UPSTREAM_CONNECT_RETRY_DELAY)
+            if last_error is not None or conn is None:
+                raise last_error or OSError("upstream connection failed")
             conn.request(self.command, target_path, body=body, headers=headers)
             resp = conn.getresponse()
         except OSError as exc:

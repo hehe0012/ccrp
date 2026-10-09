@@ -7,6 +7,7 @@ the user's OpenSSH configuration and agent.
 from __future__ import annotations
 
 import os
+import json
 import queue
 import subprocess
 import sys
@@ -513,8 +514,9 @@ class CcrpGui:
         server_port = port_value(self.server_port.get(), "服务器代理端口")
         ssh_port = port_value(self.ssh_port.get(), "SSH 反向端口")
         timeout = max(5, int(positive_float(self.ssh_connect_timeout.get(), "SSH 建连秒数") + 10))
-        health_command = f"curl -fsS --connect-timeout 2 --max-time 8 http://127.0.0.1:{server_port}/__ccrp/health"
+        health_command = f"curl -sS --connect-timeout 2 --max-time 8 http://127.0.0.1:{server_port}/__ccrp/health"
         health_ok = False
+        health_body = ""
         try:
             proc = subprocess.run(
                 [*ccrp.ssh_probe_command(config), health_command],
@@ -524,8 +526,14 @@ class CcrpGui:
                 errors="replace",
                 timeout=timeout,
             )
-            health_ok = proc.returncode == 0
-            health = "正常" if health_ok else (proc.stderr.strip() or f"失败({proc.returncode})")
+            health_body = proc.stdout.strip()
+            health_ok = proc.returncode == 0 and self._health_response_ok(health_body, ssh_port)
+            if proc.returncode != 0:
+                health = proc.stderr.strip() or f"失败({proc.returncode})"
+            elif not health_ok:
+                health = self._health_target_status(health_body, ssh_port)
+            else:
+                health = f"正常（目标 127.0.0.1:{ssh_port}）"
         except subprocess.TimeoutExpired:
             health = f"SSH 健康检查超时（{timeout} 秒）"
         ports_command = f"ss -lnt 2>/dev/null || true"
@@ -559,9 +567,13 @@ class CcrpGui:
         port_ok = ports_ok
         tunnel_ok = bool(self.tunnel_process and self.tunnel_process.poll() is None)
         route_command = (
+            "for attempt in 1 2 3; do "
             f"curl -sS --connect-timeout 2 --max-time 8 "
             f"-o /dev/null -w 'HTTP_CODE:%{{http_code}}\\n' "
-            f"http://127.0.0.1:{ssh_port}/v1/models"
+            "-X POST -H 'Content-Type: application/json' --data '{}' "
+            f"http://127.0.0.1:{ssh_port}/v1/responses; "
+            "sleep 0.3; "
+            "done"
         )
         route_ok = False
         route_status = "未检查"
@@ -584,14 +596,49 @@ class CcrpGui:
     def _http_probe_status(stdout: str, returncode: int, stderr: str = "") -> tuple[str, bool]:
         """Interpret a remote curl probe without requiring a successful HTTP status."""
         marker = "HTTP_CODE:"
-        code_text = ""
+        codes: list[str] = []
         for line in stdout.splitlines():
             if line.startswith(marker):
                 code_text = line[len(marker):].strip()
-        if returncode == 0 and len(code_text) == 3 and code_text.isdigit() and code_text != "000":
-            return f"已打通（HTTP {code_text}）", True
+                if len(code_text) == 3 and code_text.isdigit():
+                    codes.append(code_text)
+        if returncode == 0 and len(codes) >= 3 and all(code != "000" for code in codes):
+            return f"已打通（HTTP {', '.join(codes)}）", True
         detail = stderr.strip() or f"curl 退出码 {returncode}"
+        if codes:
+            detail = f"HTTP {', '.join(codes)}；{detail}"
         return f"未打通：{detail}", False
+
+    @staticmethod
+    def _health_target_status(body: str, expected_port: int) -> str:
+        try:
+            payload = json.loads(body)
+        except (TypeError, ValueError):
+            return "健康接口返回了无法解析的内容"
+        targets = [
+            str(route.get("target"))
+            for route in payload.get("routes", [])
+            if isinstance(route, dict) and route.get("target")
+        ]
+        expected = f"127.0.0.1:{expected_port}"
+        if targets and expected not in targets:
+            return f"目标端口不一致：服务器为 {', '.join(targets)}，本地配置为 {expected}"
+        return "健康接口返回异常"
+
+    @classmethod
+    def _health_response_ok(cls, body: str, expected_port: int) -> bool:
+        try:
+            payload = json.loads(body)
+        except (TypeError, ValueError):
+            return False
+        if payload.get("ok") is not True:
+            return False
+        targets = [
+            str(route.get("target"))
+            for route in payload.get("routes", [])
+            if isinstance(route, dict) and route.get("target")
+        ]
+        return bool(targets) and f"127.0.0.1:{expected_port}" in targets
 
     @staticmethod
     def _listening_port(line: str, port: int) -> bool:

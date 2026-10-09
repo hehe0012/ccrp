@@ -62,6 +62,7 @@ class CcrpConfigTests(unittest.TestCase):
             ccrp.get_ssh_keepalive({"ssh": {"server_alive_interval": 12, "server_alive_count_max": 2}}),
             (12.0, 2),
         )
+        self.assertEqual(ccrp.UPSTREAM_CONNECT_RETRIES, 3)
 
     def test_legacy_connect_timeout_option_is_preserved(self):
         config = {
@@ -111,12 +112,18 @@ class CcrpConfigTests(unittest.TestCase):
         self.assertFalse(ccrp_gui.CcrpGui._listening_port("LISTEN 0 5 127.0.0.1:180820 0.0.0.0:*", 18082))
 
     def test_http_probe_accepts_any_real_http_response(self):
-        status, ok = ccrp_gui.CcrpGui._http_probe_status("HTTP_CODE:401\n", 0)
-        self.assertEqual(status, "已打通（HTTP 401）")
+        status, ok = ccrp_gui.CcrpGui._http_probe_status("HTTP_CODE:400\nHTTP_CODE:400\nHTTP_CODE:401\n", 0)
+        self.assertEqual(status, "已打通（HTTP 400, 400, 401）")
         self.assertTrue(ok)
-        status, ok = ccrp_gui.CcrpGui._http_probe_status("HTTP_CODE:000\n", 7, "Connection refused")
+        status, ok = ccrp_gui.CcrpGui._http_probe_status("HTTP_CODE:000\nHTTP_CODE:000\nHTTP_CODE:000\n", 0, "Connection refused")
         self.assertIn("未打通", status)
         self.assertFalse(ok)
+
+    def test_health_probe_requires_configured_upstream_target(self):
+        body = '{"ok": true, "routes": [{"target": "127.0.0.1:18082"}]}'
+        self.assertTrue(ccrp_gui.CcrpGui._health_response_ok(body, 18082))
+        self.assertFalse(ccrp_gui.CcrpGui._health_response_ok(body, 18081))
+        self.assertIn("目标端口不一致", ccrp_gui.CcrpGui._health_target_status(body, 18081))
 
     def test_read_ssh_hosts_skips_patterns_and_duplicates(self):
         with tempfile.TemporaryDirectory() as td:
