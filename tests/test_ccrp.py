@@ -125,6 +125,22 @@ class CcrpConfigTests(unittest.TestCase):
         self.assertFalse(ccrp_gui.CcrpGui._health_response_ok(body, 18081))
         self.assertIn("目标端口不一致", ccrp_gui.CcrpGui._health_target_status(body, 18081))
 
+    def test_http_probe_requires_three_real_responses(self):
+        status, ok = ccrp_gui.CcrpGui._http_probe_status(
+            "HTTP_CODE:400\nHTTP_CODE:000\nHTTP_CODE:400\n", 0, "Connection refused"
+        )
+        self.assertFalse(ok)
+        self.assertIn("HTTP 400, 000, 400", status)
+
+    def test_listening_port_exactly_matches_requested_server_port(self):
+        lines = [
+            "LISTEN 0 5 127.0.0.1:18082 0.0.0.0:*",
+            "LISTEN 0 5 127.0.0.1:18083 0.0.0.0:*",
+        ]
+        self.assertTrue(any(ccrp_gui.CcrpGui._listening_port(line, 18082) for line in lines))
+        self.assertTrue(any(ccrp_gui.CcrpGui._listening_port(line, 18083) for line in lines))
+        self.assertFalse(any(ccrp_gui.CcrpGui._listening_port(line, 18084) for line in lines))
+
     def test_read_ssh_hosts_skips_patterns_and_duplicates(self):
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / "config"
