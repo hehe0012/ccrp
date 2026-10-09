@@ -90,6 +90,8 @@ class CcrpGui:
         self.ssh_file = tk.StringVar(value=str(default_ssh_config()))
         self.host = tk.StringVar()
         self.remote_dir = tk.StringVar(value="~/software/ccrp")
+        self.repo_url = tk.StringVar(value=ccrp.DEFAULT_REPOSITORY_URL)
+        self.repo_branch = tk.StringVar(value=ccrp.DEFAULT_REPOSITORY_BRANCH)
         self.config_path = tk.StringVar(value=str(Path.cwd() / "ccrp.gui.json"))
         self.local_host = tk.StringVar(value="127.0.0.1")
         self.local_port = tk.StringVar(value="15721")
@@ -107,6 +109,7 @@ class CcrpGui:
         self.route_status = tk.StringVar(value="未检查")
         self.overall_status = tk.StringVar(value="未运行")
 
+        self.load_saved_state()
         self.build_ui()
         self.load_hosts()
         self.root.after(200, self.process_events)
@@ -155,10 +158,8 @@ class CcrpGui:
         ttk.Button(deploy_frame, text="启动服务", command=self.start_server).grid(row=0, column=4, padx=4, pady=5)
         ttk.Label(deploy_frame, text="可输入 ~/your_path，也可从服务器家目录选择").grid(row=1, column=1, columnspan=4, padx=6, pady=(0, 5), sticky="w")
         ttk.Label(deploy_frame, text="仓库地址").grid(row=2, column=0, padx=6, pady=5, sticky="w")
-        self.repo_url = tk.StringVar(value=ccrp.DEFAULT_REPOSITORY_URL)
         ttk.Entry(deploy_frame, textvariable=self.repo_url).grid(row=2, column=1, padx=6, pady=5, sticky="ew")
         ttk.Label(deploy_frame, text="分支").grid(row=2, column=2, padx=6, pady=5, sticky="e")
-        self.repo_branch = tk.StringVar(value=ccrp.DEFAULT_REPOSITORY_BRANCH)
         ttk.Entry(deploy_frame, textvariable=self.repo_branch, width=14).grid(row=2, column=3, padx=6, pady=5, sticky="w")
 
         settings = ttk.LabelFrame(root, text="3. 端口与超时")
@@ -187,7 +188,7 @@ class CcrpGui:
         actions.rowconfigure(1, weight=1)
         button_row = ttk.Frame(actions)
         button_row.grid(row=0, column=0, sticky="ew", pady=(0, 6))
-        ttk.Button(button_row, text="保存配置", command=self.save_config).pack(side="left", padx=(0, 6))
+        ttk.Button(button_row, text="保存并同步配置", command=self.save_and_sync_config).pack(side="left", padx=(0, 6))
         ttk.Button(button_row, text="启动本地隧道", command=self.start_tunnel).pack(side="left", padx=6)
         ttk.Button(button_row, text="停止本地隧道", command=self.stop_tunnel).pack(side="left", padx=6)
         ttk.Button(button_row, text="重启服务器服务", command=self.start_server).pack(side="left", padx=6)
@@ -262,6 +263,82 @@ class CcrpGui:
         )
         if path:
             self.config_path.set(path)
+            if Path(path).is_file():
+                try:
+                    self.load_config_values(Path(path))
+                    self.log_line(f"已读取配置：{path}")
+                except (OSError, ValueError, SystemExit) as exc:
+                    self.log_line(f"读取配置失败：{exc}")
+
+    @staticmethod
+    def state_path() -> Path:
+        base = os.environ.get("APPDATA") or str(Path.home() / ".config")
+        return Path(base) / "ccrp" / "gui-state.json"
+
+    def load_saved_state(self) -> None:
+        """Restore the last saved config and GUI-only selections."""
+        state_path = self.state_path()
+        try:
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, OSError, ValueError):
+            state = {}
+        if not isinstance(state, dict):
+            state = {}
+        saved_path = state.get("config_path")
+        if saved_path:
+            self.config_path.set(str(saved_path))
+        path = Path(self.config_path.get()).expanduser()
+        if path.is_file():
+            try:
+                self.load_config_values(path)
+            except (OSError, ValueError, SystemExit):
+                pass
+        for key, variable in (
+            ("ssh_file", self.ssh_file),
+            ("remote_dir", self.remote_dir),
+            ("repo_url", getattr(self, "repo_url", None)),
+            ("repo_branch", getattr(self, "repo_branch", None)),
+        ):
+            value = state.get(key)
+            if value and variable is not None:
+                variable.set(str(value))
+
+    def load_config_values(self, path: Path) -> None:
+        config = ccrp.load_config(path)
+        ssh = config.get("ssh", {})
+        if not isinstance(ssh, dict):
+            ssh = {}
+        routes = config.get("routes", [])
+        route = routes[0] if isinstance(routes, list) and routes and isinstance(routes[0], dict) else {}
+        server_proxy = config.get("server_proxy", {})
+        if not isinstance(server_proxy, dict):
+            server_proxy = {}
+        self.config_path.set(str(path))
+        self.host.set(str(ssh.get("host") or self.host.get()))
+        self.ssh_file.set(str(ssh.get("config_file") or self.ssh_file.get()))
+        local = ccrp.parse_endpoint(route.get("local", "127.0.0.1:15721"))
+        remote = ccrp.parse_endpoint(route.get("remote_forward", "127.0.0.1:18082"))
+        listen = ccrp.parse_endpoint(server_proxy.get("listen", "127.0.0.1:18083"))
+        self.local_host.set(local.host)
+        self.local_port.set(str(local.port))
+        self.ssh_port.set(str(remote.port))
+        self.server_port.set(str(listen.port))
+        self.upstream_timeout.set(str(server_proxy.get("upstream_timeout", 300)))
+        self.ssh_connect_timeout.set(str(ssh.get("connect_timeout", 10)))
+        self.server_alive_interval.set(str(ssh.get("server_alive_interval", 30)))
+        self.server_alive_count.set(str(ssh.get("server_alive_count_max", 3)))
+
+    def persist_saved_state(self, path: Path) -> None:
+        state_path = self.state_path()
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        state = {
+            "config_path": str(path),
+            "ssh_file": self.ssh_file.get().strip(),
+            "remote_dir": self.remote_dir.get().strip(),
+            "repo_url": self.repo_url.get().strip(),
+            "repo_branch": self.repo_branch.get().strip(),
+        }
+        state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
     def values_to_config(self) -> dict[str, Any]:
         host = self.host.get().strip()
@@ -307,10 +384,51 @@ class CcrpGui:
         config = self.values_to_config()
         path = Path(self.config_path.get()).expanduser()
         ccrp.save_config(path, config)
+        self.persist_saved_state(path)
         self.log_line(f"已保存配置：{path}")
         if show_message:
             messagebox.showinfo("保存成功", f"配置已保存到：\n{path}")
         return path
+
+    def sync_remote_config(self, path: Path) -> None:
+        remote_dir = self.remote_dir.get().strip().rstrip("/")
+        if not remote_dir:
+            raise ValueError("请填写服务器部署文件夹")
+        command = [
+            *self.ccrp_command("sync-server-config"),
+            "-c", str(path),
+            "--remote-dir", remote_dir,
+        ]
+        self.events.put(("log", "执行：" + subprocess.list2cmdline(command)))
+        try:
+            process = subprocess.run(
+                command,
+                cwd=str(self.runtime_directory()),
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=90,
+            )
+        except OSError as exc:
+            raise RuntimeError(f"同步服务器配置失败：{exc}") from exc
+        for output in (process.stdout, process.stderr):
+            for line in output.splitlines():
+                self.events.put(("log", line))
+        if process.returncode:
+            raise RuntimeError(f"同步服务器配置失败，退出码 {process.returncode}")
+
+    def save_and_sync_config(self) -> None:
+        try:
+            path = self.save_config(False)
+        except (ValueError, OSError) as exc:
+            messagebox.showerror("配置错误", str(exc))
+            return
+        self.run_async(
+            "保存并同步本地与服务器配置",
+            lambda: self.sync_remote_config(path),
+            result_kind="config_synced",
+        )
 
     def command_config(self) -> dict[str, Any]:
         config = self.values_to_config()
@@ -458,9 +576,13 @@ class CcrpGui:
             return
         self.run_async(
             "启动前检查本地服务、SSH 和服务器端口",
-            lambda: self.tunnel_preflight(path),
+            lambda: self.sync_then_tunnel_preflight(path),
             result_kind="tunnel_ready",
         )
+
+    def sync_then_tunnel_preflight(self, path: Path) -> Path:
+        self.sync_remote_config(path)
+        return self.tunnel_preflight(path)
 
     def tunnel_preflight(self, path: Path) -> Path:
         """Verify the local route and remote ports before starting ssh -R."""
@@ -632,6 +754,7 @@ class CcrpGui:
                 *self.ccrp_command("start-server"),
                 "-c", str(path),
                 "--remote-dir", remote_dir,
+                "--sync-config",
             ]
         except (ValueError, OSError) as exc:
             messagebox.showerror("配置错误", str(exc))

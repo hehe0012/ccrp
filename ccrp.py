@@ -849,14 +849,41 @@ def deploy_server(args: argparse.Namespace) -> int:
         print(proc.stdout.strip())
 
     remote_config = args.remote_config or posixpath.join(remote_dir, "ccrp.config.json")
+    upload_server_config(config, host, remote_config)
+    print(f"remote_config:  {remote_config}")
+    print("deployment complete; server was not started")
+    return 0
+
+
+def upload_server_config(config: dict[str, Any], host: str, remote_config: str) -> None:
+    """Upload only the JSON config, without touching the remote repository."""
     parent_dir = posixpath.dirname(remote_config) or "/"
     proc = remote_run(config, host, f"mkdir -p {shlex.quote(parent_dir)}", timeout=30)
     require_success(proc, "create remote config directory")
     config_text = json.dumps(config, ensure_ascii=False, indent=2) + "\n"
-    proc = remote_run(config, host, f"cat > {shlex.quote(remote_config)}", input_text=config_text, timeout=60)
+    proc = remote_run(
+        config,
+        host,
+        f"cat > {shlex.quote(remote_config)}",
+        input_text=config_text,
+        timeout=60,
+    )
     require_success(proc, "upload server config")
-    print(f"remote_config:  {remote_config}")
-    print("deployment complete; server was not started")
+
+
+def sync_server_config(args: argparse.Namespace) -> int:
+    """Upload the local JSON config without cloning or starting the server."""
+    config = load_config(Path(args.config))
+    host = get_ssh_host(config, args.ssh)
+    home = remote_home(config, host)
+    remote_dir = resolve_remote_dir(home, args.remote_dir)
+    if not remote_dir:
+        raise SystemExit("sync-server-config requires --remote-dir")
+    remote_config = args.remote_config or posixpath.join(remote_dir, "ccrp.config.json")
+    print(f"syncing server config on {host}")
+    print(f"  remote_config:  {remote_config}")
+    upload_server_config(config, host, remote_config)
+    print("server config synchronized; repository and service were not changed")
     return 0
 
 
@@ -869,6 +896,9 @@ def start_server(args: argparse.Namespace) -> int:
     if not remote_dir:
         raise SystemExit("start-server requires --remote-dir")
     remote_config = args.remote_config or posixpath.join(remote_dir, "ccrp.config.json")
+    if args.sync_config:
+        upload_server_config(config, host, remote_config)
+        print("  config_sync:   uploaded")
     session = args.tmux_session
     command = build_server_start_command(remote_dir, remote_config, session, restart=args.restart)
     print(f"starting server service on {host}")
@@ -1073,8 +1103,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--remote-dir", required=True, help="remote repository directory; supports ~/...")
     p.add_argument("--remote-config", help="remote config path; defaults to <remote-dir>/ccrp.config.json")
     p.add_argument("--tmux-session", default="ccrp-server", help="tmux session name")
+    p.add_argument("--sync-config", action="store_true", help="upload the local config before starting")
     p.add_argument("--no-restart", dest="restart", action="store_false", help="fail if the tmux session already exists")
     p.set_defaults(func=start_server, restart=True)
+
+    p = sub.add_parser("sync-server-config", help="upload the local config without deploying or starting")
+    p.add_argument("-c", "--config", default=DEFAULT_CONFIG)
+    p.add_argument("--ssh", help="override SSH host")
+    p.add_argument("--remote-dir", required=True, help="remote repository directory; supports ~/...")
+    p.add_argument("--remote-config", help="remote config path; defaults to <remote-dir>/ccrp.config.json")
+    p.set_defaults(func=sync_server_config)
 
     p = sub.add_parser("install-server", help="legacy combined server deployment command")
     p.add_argument("-c", "--config", default=DEFAULT_CONFIG)
