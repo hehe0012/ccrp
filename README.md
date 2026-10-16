@@ -157,7 +157,7 @@ GUI 中的“仓库地址”和“分支”默认分别为 `https://github.com/h
 
 ## 三、单独启动服务器服务
 
-部署完成后，使用 `start-server` 启动或重启服务器端 `ccrp-server`。该命令只检查目标目录中的 `ccrp.py` 和配置文件，然后创建 tmux 会话，不会执行 `git clone`、`git pull` 或更新仓库：
+部署完成后，使用 `start-server` 启动或重启服务器端 `ccrp-server`。该命令只检查目标目录中的 `ccrp.py` 和配置文件，然后创建 tmux 会话，不会执行 `git clone`、`git pull` 或更新仓库。默认重启时还会按照当前 JSON 配置中的 `routes[].remote_forward` 端口，清理当前 SSH 用户遗留的旧反向转发进程，再启动服务：
 
 ```powershell
 python .\ccrp.py start-server `
@@ -166,7 +166,9 @@ python .\ccrp.py start-server `
   --tmux-session ccrp-server
 ```
 
-如果服务器尚未部署，启动命令会明确报错，此时先运行上一节的 `deploy-server`。默认会先停止同名旧 tmux 会话再启动；使用 `--no-restart` 可以在已有会话时拒绝重启。
+如果服务器尚未部署，启动命令会明确报错，此时先运行上一节的 `deploy-server`。默认会先停止同名旧 tmux 会话、清理当前用户拥有且命令行为 `sshd:` 的旧 SSH 反向转发，再启动服务；不会终止普通业务进程、其他用户的进程或其他 SSH 会话。使用 `--no-clean-forward` 可以关闭端口清理，使用 `--no-restart` 可以在已有会话时拒绝重启。
+
+GUI 中的“重启服务器服务”会自动传递同样的清理逻辑。清理只针对当前配置的反向端口，例如配置为 `127.0.0.1:18081` 时只检查 18081。若该端口由普通进程占用，启动命令会报告并保留该进程，此时应使用 `ss -lntp` 查明占用者；若是另一台机器上的 SSH 隧道，该隧道不属于当前服务器用户，不能由本命令强制清除。
 
 服务器端部署目录和运行配置确认命令：
 

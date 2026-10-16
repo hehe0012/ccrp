@@ -33,7 +33,7 @@ import time
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 from urllib.parse import SplitResult, urlsplit, urlunsplit
 
 VERSION = "0.2.1"
@@ -803,8 +803,56 @@ def build_repository_sync_command(repository_url: str, branch: str, remote_dir: 
     )
 
 
-def build_server_start_command(remote_dir: str, remote_config: str, session: str = "ccrp-server", *, restart: bool = True) -> str:
-    """Build a remote command that starts an already-deployed server checkout."""
+def build_forward_cleanup_command(forward_ports: Iterable[int]) -> str:
+    """Build a safe cleanup command for stale user-owned SSH reverse forwards."""
+    ports = sorted({int(port) for port in forward_ports})
+    if not ports:
+        return "true"
+    port_args = " ".join(shlex.quote(str(port)) for port in ports)
+    return "\n".join(
+        [
+            "cleanup_forward_port() {",
+            "  port=\"$1\"",
+            "  pids=$(ss -H -lntp 2>/dev/null | awk -v port=\"$port\" '$4 ~ (\":\" port \"$\") { print }' | grep -oE 'pid=[0-9]+' | cut -d= -f2 | sort -u || true)",
+            "  for pid in $pids; do",
+            "    [ -d \"/proc/$pid\" ] || continue",
+            "    owner=$(ps -o user= -p \"$pid\" 2>/dev/null | tr -d ' ' || true)",
+            "    command=$(tr '\\0' ' ' < \"/proc/$pid/cmdline\" 2>/dev/null || true)",
+            "    if printf '%s' \"$command\" | grep -q \"sshd: $(id -un)@\"; then",
+            "      kill \"$pid\" 2>/dev/null || true",
+            "      echo \"cleaned stale SSH reverse forward: 127.0.0.1:$port (pid $pid)\"",
+            "    else",
+            "      echo \"left non-SSH or foreign listener on 127.0.0.1:$port (pid $pid)\" >&2",
+            "    fi",
+            "  done",
+            "  for attempt in 1 2 3 4 5; do",
+            "    still_listening=$(ss -H -lnt 2>/dev/null | awk -v port=\"$port\" '$4 ~ (\":\" port \"$\") { print }' || true)",
+            "    [ -z \"$still_listening\" ] && break",
+            "    sleep 0.2",
+            "  done",
+            "  if [ -n \"$still_listening\" ]; then",
+            "    echo \"warning: reverse forward port 127.0.0.1:$port is still listening\" >&2",
+            "  fi",
+            "}",
+            "if command -v ss >/dev/null 2>&1; then",
+            f"  for port in {port_args}; do cleanup_forward_port \"$port\"; done",
+            "else",
+            "  echo 'warning: ss is unavailable; stale SSH reverse forwards were not cleaned' >&2",
+            "fi",
+        ]
+    )
+
+
+def build_server_start_command(
+    remote_dir: str,
+    remote_config: str,
+    session: str = "ccrp-server",
+    *,
+    restart: bool = True,
+    forward_ports: Iterable[int] = (),
+    cleanup_forwards: bool = True,
+) -> str:
+    """Build a remote command that cleans stale forwards and starts the server checkout."""
     quoted_dir = shlex.quote(remote_dir)
     quoted_bin = shlex.quote(posixpath.join(remote_dir.rstrip("/"), "ccrp.py"))
     quoted_config = shlex.quote(remote_config)
@@ -814,12 +862,14 @@ def build_server_start_command(remote_dir: str, remote_config: str, session: str
         for part in ["python3", posixpath.join(remote_dir.rstrip("/"), "ccrp.py"), "server", "--config", remote_config]
     )
     stop_cmd = f"tmux kill-session -t {quoted_session} 2>/dev/null || true; " if restart else ""
+    cleanup_cmd = build_forward_cleanup_command(forward_ports) if cleanup_forwards and restart else "true"
     return "\n".join(
         [
             "set -eu",
             f"test -f {quoted_bin} || {{ echo 'ccrp.py not found in deployed directory' >&2; exit 2; }}",
             f"test -f {quoted_config} || {{ echo 'server config not found' >&2; exit 2; }}",
-            stop_cmd + f"tmux new-session -d -s {quoted_session} -c {quoted_dir} {shlex.quote(start_cmd)}",
+            stop_cmd + cleanup_cmd,
+            f"tmux new-session -d -s {quoted_session} -c {quoted_dir} {shlex.quote(start_cmd)}",
             f"tmux list-sessions | grep -- {quoted_session}",
         ]
     )
@@ -900,11 +950,20 @@ def start_server(args: argparse.Namespace) -> int:
         upload_server_config(config, host, remote_config)
         print("  config_sync:   uploaded")
     session = args.tmux_session
-    command = build_server_start_command(remote_dir, remote_config, session, restart=args.restart)
+    forward_ports = sorted({route.remote_forward.port for route in get_routes(config)})
+    command = build_server_start_command(
+        remote_dir,
+        remote_config,
+        session,
+        restart=args.restart,
+        forward_ports=forward_ports,
+        cleanup_forwards=args.clean_forward,
+    )
     print(f"starting server service on {host}")
     print(f"  remote_dir:    {remote_dir}")
     print(f"  remote_config: {remote_config}")
     print(f"  tmux_session:  {session}")
+    print(f"  clean_forwards: {'yes' if args.clean_forward and args.restart else 'no'} ({', '.join(map(str, forward_ports)) or 'none'})")
     proc = remote_run(config, host, command, timeout=60)
     require_success(proc, "start server service")
     if proc.stdout.strip():
@@ -1104,8 +1163,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--remote-config", help="remote config path; defaults to <remote-dir>/ccrp.config.json")
     p.add_argument("--tmux-session", default="ccrp-server", help="tmux session name")
     p.add_argument("--sync-config", action="store_true", help="upload the local config before starting")
+    p.add_argument("--no-clean-forward", dest="clean_forward", action="store_false", help="do not clean user-owned SSH reverse forwards before restart")
     p.add_argument("--no-restart", dest="restart", action="store_false", help="fail if the tmux session already exists")
-    p.set_defaults(func=start_server, restart=True)
+    p.set_defaults(func=start_server, restart=True, clean_forward=True)
 
     p = sub.add_parser("sync-server-config", help="upload the local config without deploying or starting")
     p.add_argument("-c", "--config", default=DEFAULT_CONFIG)

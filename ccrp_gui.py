@@ -726,7 +726,7 @@ class CcrpGui:
         code = process.wait()
         self.events.put(("tunnel_exit", code))
 
-    def stop_tunnel(self) -> None:
+    def stop_tunnel(self, *, wait: bool = True) -> bool:
         process = self.tunnel_process
         if process and process.poll() is None:
             if os.name == "nt":
@@ -740,11 +740,24 @@ class CcrpGui:
                 )
             else:
                 process.terminate()
+            if wait:
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    self.log_line("本地隧道未能在 5 秒内退出")
+                    return False
             self.log_line("已请求停止本地隧道")
+            return process.poll() is not None
         else:
             self.log_line("本地隧道当前未运行")
+            return True
 
     def start_server(self) -> None:
+        if self.tunnel_process and self.tunnel_process.poll() is None:
+            self.log_line("重启服务器服务前先停止本地 SSH 反向隧道")
+            if not self.stop_tunnel():
+                messagebox.showerror("操作失败", "本地 SSH 反向隧道未能停止，已取消服务器重启。")
+                return
         try:
             path = self.save_config(False)
             remote_dir = self.remote_dir.get().strip().rstrip("/")

@@ -183,6 +183,36 @@ class CcrpConfigTests(unittest.TestCase):
         self.assertNotIn("git clone", command)
         self.assertNotIn("git pull", command)
 
+    def test_forward_cleanup_targets_only_configured_user_ssh_forwards(self):
+        command = ccrp.build_forward_cleanup_command([18081, 18081, 18082])
+        self.assertIn("for port in 18081 18082", command)
+        self.assertIn("ss -H -lntp", command)
+        self.assertIn("grep -q \"sshd: $(id -un)@\"", command)
+        self.assertIn("kill \"$pid\"", command)
+        self.assertIn("warning: reverse forward port", command)
+        self.assertNotIn("killall", command)
+        self.assertNotIn("pkill", command)
+
+    def test_start_command_cleans_forward_ports_before_server_start(self):
+        command = ccrp.build_server_start_command(
+            "/home/test/ccrp",
+            "/home/test/ccrp/ccrp.config.json",
+            forward_ports=[18081],
+        )
+        self.assertIn("cleaned stale SSH reverse forward", command)
+        self.assertIn("tmux new-session", command)
+        self.assertLess(command.index("cleaned stale SSH reverse forward"), command.index("tmux new-session"))
+
+    def test_start_command_can_disable_forward_cleanup(self):
+        command = ccrp.build_server_start_command(
+            "/home/test/ccrp",
+            "/home/test/ccrp/ccrp.config.json",
+            forward_ports=[18081],
+            cleanup_forwards=False,
+        )
+        self.assertNotIn("cleaned stale SSH reverse forward", command)
+        self.assertIn("tmux new-session", command)
+
     def test_server_command_parsers_are_separate(self):
         parser = ccrp.build_parser()
         deploy = parser.parse_args(["deploy-server", "--remote-dir", "~/ccrp"])
@@ -190,6 +220,12 @@ class CcrpConfigTests(unittest.TestCase):
         self.assertEqual(deploy.remote_dir, "~/ccrp")
         self.assertEqual(start.remote_dir, "~/ccrp")
         self.assertTrue(start.restart)
+        self.assertTrue(start.clean_forward)
+
+        no_clean = parser.parse_args([
+            "start-server", "--remote-dir", "~/ccrp", "--no-clean-forward"
+        ])
+        self.assertFalse(no_clean.clean_forward)
 
     def test_install_server_parser_accepts_repository_options(self):
         parser = ccrp.build_parser()
